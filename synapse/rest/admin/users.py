@@ -464,7 +464,7 @@ class UserRegisterServlet(RestServlet):
         register = RegisterRestServlet(self.hs)
 
         user_id = await register.registration_handler.register_user(
-            localpart=body["username"].lower(),
+            localpart=body["username"],
             password_hash=password_hash,
             admin=bool(admin),
             user_type=user_type,

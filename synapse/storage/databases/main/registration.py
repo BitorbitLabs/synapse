@@ -480,7 +480,7 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
         """
 
         def f(txn):
-            sql = "SELECT name, password_hash FROM users WHERE lower(name) = lower(?)"
+            sql = "SELECT name, password_hash FROM users WHERE name = ?"
             txn.execute(sql, (user_id,))
             return dict(txn)
 

@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import abc
+import base58
 import re
 import string
 import sys
@@ -44,6 +45,7 @@ from twisted.internet.interfaces import (
     IReactorTime,
 )
 
+from synapse.api.constants import USERID_BYTES_LENGTH
 from synapse.api.errors import Codes, SynapseError
 from synapse.util.stringutils import parse_and_validate_server_name
 
@@ -334,7 +336,7 @@ class GroupID(DomainSpecificString):
 
 
 mxid_localpart_allowed_characters = set(
-    "_-./=" + string.ascii_lowercase + string.digits
+    '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 )
 
 
@@ -348,6 +350,20 @@ def contains_invalid_mxid_characters(localpart: str) -> bool:
         True if there are any naughty characters
     """
     return any(c not in mxid_localpart_allowed_characters for c in localpart)
+
+
+def is_valid_mxid_len(localpart: str) -> bool:
+    """Check that mxid a 32 bytes after decoding from base58
+
+    Args:
+        localpart: the localpath to be checked
+
+    Returns:
+        True if the localpart 32 bytes
+    """
+    mxid_bytes = base58.b58decode(localpart)
+
+    return len(mxid_bytes) == USERID_BYTES_LENGTH
 
 
 UPPER_CASE_PATTERN = re.compile(b"[A-Z_]")
@@ -370,52 +386,25 @@ NON_MXID_CHARACTER_PATTERN = re.compile(
 )
 
 
-def map_username_to_mxid_localpart(
-    username: Union[str, bytes], case_sensitive: bool = False
-) -> str:
+def map_username_to_mxid_localpart(username: Union[str, bytes]) -> str:
     """Map a username onto a string suitable for a MXID
 
-    This follows the algorithm laid out at
-    https://matrix.org/docs/spec/appendices.html#mapping-from-other-character-sets.
+    This follows the 32 bytes in base58 encoding.
 
     Args:
         username: username to be mapped
-        case_sensitive: true if TEST and test should be mapped
-            onto different mxids
 
     Returns:
         unicode: string suitable for a mxid localpart
     """
-    if not isinstance(username, bytes):
-        username = username.encode("utf-8")
+    if isinstance(username, str):
+        return username
 
-    # first we sort out upper-case characters
-    if case_sensitive:
+    # Encode bytes to base58
+    username = base58.b58encode(username)
 
-        def f1(m):
-            return b"_" + m.group().lower()
-
-        username = UPPER_CASE_PATTERN.sub(f1, username)
-    else:
-        username = username.lower()
-
-    # then we sort out non-ascii characters
-    def f2(m):
-        g = m.group()[0]
-        if isinstance(g, str):
-            # on python 2, we need to do a ord(). On python 3, the
-            # byte itself will do.
-            g = ord(g)
-        return b"=%02x" % (g,)
-
-    username = NON_MXID_CHARACTER_PATTERN.sub(f2, username)
-
-    # we also do the =-escaping to mxids starting with an underscore.
-    username = re.sub(b"^_", b"=5f", username)
-
-    # we should now only have ascii bytes left, so can decode back to a
-    # unicode.
-    return username.decode("ascii")
+    # Decode binary string to utf-8
+    return username.decode()
 
 
 @attr.s(frozen=True, slots=True, cmp=False)

@@ -1044,7 +1044,7 @@ class AuthHandler(BaseHandler):
         # Check if we've hit the failed ratelimit (but don't update it)
         if ratelimit:
             await self._failed_login_attempts_ratelimiter.ratelimit(
-                None, qualified_user_id.lower(), update=False
+                None, qualified_user_id, update=False
             )
 
         try:
@@ -1056,7 +1056,7 @@ class AuthHandler(BaseHandler):
             # should have happened above.
             if ratelimit:
                 await self._failed_login_attempts_ratelimiter.can_do_action(
-                    None, qualified_user_id.lower()
+                    None, qualified_user_id
                 )
             raise
 

@@ -328,10 +328,10 @@ class DataStore(
             # `name` is in database already in lower case
             if name:
                 filters.append("(name LIKE ? OR LOWER(displayname) LIKE ?)")
-                args.extend(["@%" + name.lower() + "%:%", "%" + name.lower() + "%"])
+                args.extend(["@%" + name + "%:%", "%" + name + "%"])
             elif user_id:
                 filters.append("name LIKE ?")
-                args.extend(["%" + user_id.lower() + "%"])
+                args.extend(["%" + user_id + "%"])
 
             if not guests:
                 filters.append("is_guest = 0")

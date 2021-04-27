@@ -262,7 +262,7 @@ class LoginRestServlet(RestServlet):
         # too often. This happens here rather than before as we don't
         # necessarily know the user before now.
         if ratelimit:
-            await self._account_ratelimiter.ratelimit(None, user_id.lower())
+            await self._account_ratelimiter.ratelimit(None, user_id)
 
         if create_non_existent_users:
             canonical_uid = await self.auth_handler.check_user_exists(user_id)
