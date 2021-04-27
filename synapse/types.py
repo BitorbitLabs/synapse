@@ -14,9 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import abc
-import base58
 import re
-import string
 import sys
 from collections import namedtuple
 from typing import (
@@ -34,6 +32,7 @@ from typing import (
 )
 
 import attr
+import base58
 from signedjson.key import decode_verify_key_bytes
 from unpaddedbase64 import decode_base64
 from zope.interface import Interface
@@ -336,7 +335,7 @@ class GroupID(DomainSpecificString):
 
 
 mxid_localpart_allowed_characters = set(
-    '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+    "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 )
 
 

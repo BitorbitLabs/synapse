@@ -137,7 +137,9 @@ class PresenceRouterTestCase(FederatingHomeserverTestCase):
         self.presence_receiving_user_id = self.register_user(
             self.presence_gobbler_key, "monkey"
         )
-        self.presence_receiving_user_tok = self.login(self.presence_gobbler_key, "monkey")
+        self.presence_receiving_user_tok = self.login(
+            self.presence_gobbler_key, "monkey"
+        )
 
         # And two users who should not have any special routing
         self.other_user_one_id = self.register_user(other_user_one_key, "monkey")
@@ -252,11 +254,15 @@ class PresenceRouterTestCase(FederatingHomeserverTestCase):
         self.presence_receiving_user_one_id = self.register_user(
             self.presence_gobbler1_key, "monkey"
         )
-        self.presence_receiving_user_one_tok = self.login(self.presence_gobbler1_key, "monkey")
+        self.presence_receiving_user_one_tok = self.login(
+            self.presence_gobbler1_key, "monkey"
+        )
         self.presence_receiving_user_two_id = self.register_user(
             self.presence_gobbler2_key, "monkey"
         )
-        self.presence_receiving_user_two_tok = self.login(self.presence_gobbler2_key, "monkey")
+        self.presence_receiving_user_two_tok = self.login(
+            self.presence_gobbler2_key, "monkey"
+        )
 
         # Have all three users send some presence updates
         send_presence_update(

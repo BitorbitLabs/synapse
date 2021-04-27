@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 # [1] https://pip.pypa.io/en/stable/reference/pip_install/#requirement-specifiers.
 
 REQUIREMENTS = [
+    "base58>=2.1.0",
     "jsonschema>=2.5.1",
     "frozendict>=1",
     "unpaddedbase64>=1.1.0",

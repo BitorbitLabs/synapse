@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple
 from prometheus_client import Counter
 
 from synapse import types
-from synapse.api.constants import USERID_BYTES_LENGTH, EventTypes, JoinRules, LoginType
+from synapse.api.constants import EventTypes, JoinRules, LoginType
 from synapse.api.errors import AuthError, Codes, ConsentNotGivenError, SynapseError
 from synapse.appservice import ApplicationService
 from synapse.config.server import is_threepid_reserved
@@ -102,8 +102,7 @@ class RegistrationHandler(BaseHandler):
 
         if not is_valid_mxid_len(localpart):
             raise SynapseError(
-                400,
-                "User ID length must be 32 bytes", Codes.INVALID_USERNAME
+                400, "User ID length must be 32 bytes", Codes.INVALID_USERNAME
             )
 
         if not localpart:
