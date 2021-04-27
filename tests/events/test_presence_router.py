@@ -16,6 +16,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 from unittest.mock import Mock
 
 import attr
+from solana import account
 
 from synapse.api.constants import EduTypes
 from synapse.events.presence_router import PresenceRouter
@@ -86,6 +87,18 @@ class PresenceRouterTestCase(FederatingHomeserverTestCase):
         presence.register_servlets,
     ]
 
+    presence_gobbler = account.Account()
+    presence_gobbler_key = str(presence_gobbler.public_key())
+
+    presence_gobbler1 = account.Account()
+    presence_gobbler1_key = str(presence_gobbler1.public_key())
+
+    presence_gobbler2 = account.Account()
+    presence_gobbler2_key = str(presence_gobbler2.public_key())
+
+    far_away_person = account.Account()
+    far_away_person_key = str(far_away_person.public_key())
+
     def make_homeserver(self, reactor, clock):
         return self.setup_test_homeserver(
             federation_transport_client=Mock(spec=["send_transaction"]),
@@ -102,7 +115,7 @@ class PresenceRouterTestCase(FederatingHomeserverTestCase):
                     "module": __name__ + ".PresenceRouterTestModule",
                     "config": {
                         "users_who_should_receive_all_presence": [
-                            "@presence_gobbler:test",
+                            f"@{presence_gobbler}:test",
                         ]
                     },
                 }
@@ -115,16 +128,24 @@ class PresenceRouterTestCase(FederatingHomeserverTestCase):
         presence for them, due to presence routing.
         """
         # Create a user who should receive all presence of others
+        other_user_one = account.Account()
+        other_user_one_key = str(other_user_one.public_key())
+
+        other_user_two = account.Account()
+        other_user_two_key = str(other_user_two.public_key())
+
         self.presence_receiving_user_id = self.register_user(
-            "presence_gobbler", "monkey"
+            self.presence_gobbler_key, "monkey"
         )
-        self.presence_receiving_user_tok = self.login("presence_gobbler", "monkey")
+        self.presence_receiving_user_tok = self.login(
+            self.presence_gobbler_key, "monkey"
+        )
 
         # And two users who should not have any special routing
-        self.other_user_one_id = self.register_user("other_user_one", "monkey")
-        self.other_user_one_tok = self.login("other_user_one", "monkey")
-        self.other_user_two_id = self.register_user("other_user_two", "monkey")
-        self.other_user_two_tok = self.login("other_user_two", "monkey")
+        self.other_user_one_id = self.register_user(other_user_one_key, "monkey")
+        self.other_user_one_tok = self.login(other_user_one_key, "monkey")
+        self.other_user_two_id = self.register_user(other_user_two_key, "monkey")
+        self.other_user_two_tok = self.login(other_user_two_key, "monkey")
 
         # Put the other two users in a room with each other
         room_id = self.helper.create_room_as(
@@ -178,7 +199,7 @@ class PresenceRouterTestCase(FederatingHomeserverTestCase):
             self.presence_receiving_user_id,
             self.presence_receiving_user_tok,
             "online",
-            "presence_gobbler",
+            self.presence_gobbler_key,
         )
 
         # Check that the presence receiving user gets everyone's presence
@@ -207,9 +228,9 @@ class PresenceRouterTestCase(FederatingHomeserverTestCase):
                     "module": __name__ + ".PresenceRouterTestModule",
                     "config": {
                         "users_who_should_receive_all_presence": [
-                            "@presence_gobbler1:test",
-                            "@presence_gobbler2:test",
-                            "@far_away_person:island",
+                            f"@{presence_gobbler1}:test",
+                            f"@{presence_gobbler2}:test",
+                            f"@{far_away_person}:island",
                         ]
                     },
                 }
@@ -222,19 +243,26 @@ class PresenceRouterTestCase(FederatingHomeserverTestCase):
         of specified local and remote users, with a custom PresenceRouter module enabled.
         """
         # Create a user who will send presence updates
-        self.other_user_id = self.register_user("other_user", "monkey")
-        self.other_user_tok = self.login("other_user", "monkey")
+        other_user_one = account.Account()
+        other_user_one_key = str(other_user_one.public_key())
+
+        self.other_user_id = self.register_user(other_user_one_key, "monkey")
+        self.other_user_tok = self.login(other_user_one_key, "monkey")
 
         # And another two users that will also send out presence updates, as well as receive
         # theirs and everyone else's
         self.presence_receiving_user_one_id = self.register_user(
-            "presence_gobbler1", "monkey"
+            self.presence_gobbler1_key, "monkey"
         )
-        self.presence_receiving_user_one_tok = self.login("presence_gobbler1", "monkey")
+        self.presence_receiving_user_one_tok = self.login(
+            self.presence_gobbler1_key, "monkey"
+        )
         self.presence_receiving_user_two_id = self.register_user(
-            "presence_gobbler2", "monkey"
+            self.presence_gobbler2_key, "monkey"
         )
-        self.presence_receiving_user_two_tok = self.login("presence_gobbler2", "monkey")
+        self.presence_receiving_user_two_tok = self.login(
+            self.presence_gobbler2_key, "monkey"
+        )
 
         # Have all three users send some presence updates
         send_presence_update(
@@ -287,7 +315,7 @@ class PresenceRouterTestCase(FederatingHomeserverTestCase):
         self.assertEqual(len(presence_updates), 3)
 
         # Test that sending to a remote user works
-        remote_user_id = "@far_away_person:island"
+        remote_user_id = f"@{self.far_away_person}:island"
 
         # Note that due to the remote user being in our module's
         # users_who_should_receive_all_presence config, they would have

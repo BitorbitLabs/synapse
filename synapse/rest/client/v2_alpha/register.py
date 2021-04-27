@@ -480,8 +480,6 @@ class RegisterRestServlet(RestServlet):
         # Note that we treat usernames case-insensitively in login, so they are
         # free to carry on imagining that their username is CrAzYh4cKeR if that
         # keeps them happy.
-        if desired_username is not None:
-            desired_username = desired_username.lower()
 
         # Check if this account is upgrading from a guest account.
         guest_access_token = body.get("guest_access_token", None)
@@ -592,9 +590,6 @@ class RegisterRestServlet(RestServlet):
 
             desired_username = params.get("username", None)
             guest_access_token = params.get("guest_access_token", None)
-
-            if desired_username is not None:
-                desired_username = desired_username.lower()
 
             threepid = None
             if auth_result:
