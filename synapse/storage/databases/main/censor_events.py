@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2020 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,8 +35,8 @@ class CensorEventsStore(EventsWorkerStore, CacheInvalidationWorkerStore, SQLBase
         super().__init__(database, db_conn, hs)
 
         if (
-            hs.config.run_background_tasks
-            and self.hs.config.redaction_retention_period is not None
+            hs.config.worker.run_background_tasks
+            and self.hs.config.server.redaction_retention_period is not None
         ):
             hs.get_clock().looping_call(self._censor_redactions, 5 * 60 * 1000)
 
@@ -49,7 +48,7 @@ class CensorEventsStore(EventsWorkerStore, CacheInvalidationWorkerStore, SQLBase
         By censor we mean update the event_json table with the redacted event.
         """
 
-        if self.hs.config.redaction_retention_period is None:
+        if self.hs.config.server.redaction_retention_period is None:
             return
 
         if not (
@@ -61,7 +60,9 @@ class CensorEventsStore(EventsWorkerStore, CacheInvalidationWorkerStore, SQLBase
             # created.
             return
 
-        before_ts = self._clock.time_msec() - self.hs.config.redaction_retention_period
+        before_ts = (
+            self._clock.time_msec() - self.hs.config.server.redaction_retention_period
+        )
 
         # We fetch all redactions that:
         #   1. point to an event we have,

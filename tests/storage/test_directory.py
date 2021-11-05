@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -60,5 +59,5 @@ class DirectoryStoreTestCase(HomeserverTestCase):
         self.assertEqual(self.room.to_string(), room_id)
 
         self.assertIsNone(
-            (self.get_success(self.store.get_association_from_room_alias(self.alias)))
+            self.get_success(self.store.get_association_from_room_alias(self.alias))
         )

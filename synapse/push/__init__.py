@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -95,7 +94,7 @@ class Pusher(metaclass=abc.ABCMeta):
         self._start_processing()
 
     @abc.abstractmethod
-    def _start_processing(self):
+    def _start_processing(self) -> None:
         """Start processing push notifications."""
         raise NotImplementedError()
 

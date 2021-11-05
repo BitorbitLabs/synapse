@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -132,6 +131,11 @@ class PostgresEngine(BaseDatabaseEngine):
     @property
     def supports_using_any_list(self):
         """Do we support using `a = ANY(?)` and passing a list"""
+        return True
+
+    @property
+    def supports_returning(self) -> bool:
+        """Do we support the `RETURNING` clause in insert/update/delete?"""
         return True
 
     def is_deadlock(self, error):

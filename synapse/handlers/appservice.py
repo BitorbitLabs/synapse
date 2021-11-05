@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Collection, Dict, Iterable, List, Optional, Union
 
 from prometheus_client import Counter
 
@@ -34,7 +33,7 @@ from synapse.metrics.background_process_metrics import (
     wrap_as_background_process,
 )
 from synapse.storage.databases.main.directory import RoomAliasMapping
-from synapse.types import Collection, JsonDict, RoomAlias, RoomStreamToken, UserID
+from synapse.types import JsonDict, RoomAlias, RoomStreamToken, UserID
 from synapse.util.metrics import Measure
 
 if TYPE_CHECKING:
@@ -53,13 +52,13 @@ class ApplicationServicesHandler:
         self.scheduler = hs.get_application_service_scheduler()
         self.started_scheduler = False
         self.clock = hs.get_clock()
-        self.notify_appservices = hs.config.notify_appservices
+        self.notify_appservices = hs.config.appservice.notify_appservices
         self.event_sources = hs.get_event_sources()
 
         self.current_max = 0
         self.is_processing = False
 
-    def notify_interested_services(self, max_token: RoomStreamToken):
+    def notify_interested_services(self, max_token: RoomStreamToken) -> None:
         """Notifies (pushes) all application services interested in this event.
 
         Pushing is done asynchronously, so this method won't block for any
@@ -83,12 +82,13 @@ class ApplicationServicesHandler:
         self._notify_interested_services(max_token)
 
     @wrap_as_background_process("notify_interested_services")
-    async def _notify_interested_services(self, max_token: RoomStreamToken):
+    async def _notify_interested_services(self, max_token: RoomStreamToken) -> None:
         with Measure(self.clock, "notify_interested_services"):
             self.is_processing = True
             try:
                 limit = 100
-                while True:
+                upper_bound = -1
+                while upper_bound < self.current_max:
                     (
                         upper_bound,
                         events,
@@ -96,14 +96,11 @@ class ApplicationServicesHandler:
                         self.current_max, limit
                     )
 
-                    if not events:
-                        break
-
-                    events_by_room = {}  # type: Dict[str, List[EventBase]]
+                    events_by_room: Dict[str, List[EventBase]] = {}
                     for event in events:
                         events_by_room.setdefault(event.room_id, []).append(event)
 
-                    async def handle_event(event):
+                    async def handle_event(event: EventBase) -> None:
                         # Gather interested services
                         services = await self._get_services_for_event(event)
                         if len(services) == 0:
@@ -119,9 +116,9 @@ class ApplicationServicesHandler:
 
                         if not self.started_scheduler:
 
-                            async def start_scheduler():
+                            async def start_scheduler() -> None:
                                 try:
-                                    return await self.scheduler.start()
+                                    await self.scheduler.start()
                                 except Exception:
                                     logger.error("Application Services Failure")
 
@@ -134,11 +131,13 @@ class ApplicationServicesHandler:
 
                         now = self.clock.time_msec()
                         ts = await self.store.get_received_ts(event.event_id)
+                        assert ts is not None
+
                         synapse.metrics.event_processing_lag_by_event.labels(
                             "appservice_sender"
                         ).observe((now - ts) / 1000)
 
-                    async def handle_room_events(events):
+                    async def handle_room_events(events: Iterable[EventBase]) -> None:
                         for event in events:
                             await handle_event(event)
 
@@ -154,9 +153,6 @@ class ApplicationServicesHandler:
 
                     await self.store.set_appservice_last_pos(upper_bound)
 
-                    now = self.clock.time_msec()
-                    ts = await self.store.get_received_ts(events[-1].event_id)
-
                     synapse.metrics.event_processing_positions.labels(
                         "appservice_sender"
                     ).set(upper_bound)
@@ -169,12 +165,17 @@ class ApplicationServicesHandler:
 
                     event_processing_loop_counter.labels("appservice_sender").inc()
 
-                    synapse.metrics.event_processing_lag.labels(
-                        "appservice_sender"
-                    ).set(now - ts)
-                    synapse.metrics.event_processing_last_ts.labels(
-                        "appservice_sender"
-                    ).set(ts)
+                    if events:
+                        now = self.clock.time_msec()
+                        ts = await self.store.get_received_ts(events[-1].event_id)
+                        assert ts is not None
+
+                        synapse.metrics.event_processing_lag.labels(
+                            "appservice_sender"
+                        ).set(now - ts)
+                        synapse.metrics.event_processing_last_ts.labels(
+                            "appservice_sender"
+                        ).set(ts)
             finally:
                 self.is_processing = False
 
@@ -183,20 +184,27 @@ class ApplicationServicesHandler:
         stream_key: str,
         new_token: Optional[int],
         users: Optional[Collection[Union[str, UserID]]] = None,
-    ):
-        """This is called by the notifier in the background
-        when a ephemeral event handled by the homeserver.
+    ) -> None:
+        """
+        This is called by the notifier in the background when an ephemeral event is handled
+        by the homeserver.
 
-        This will determine which appservices
-        are interested in the event, and submit them.
-
-        Events will only be pushed to appservices
-        that have opted into ephemeral events
+        This will determine which appservices are interested in the event, and submit them.
 
         Args:
             stream_key: The stream the event came from.
-            new_token: The latest stream token
-            users: The user(s) involved with the event.
+
+                `stream_key` can be "typing_key", "receipt_key" or "presence_key". Any other
+                value for `stream_key` will cause this function to return early.
+
+                Ephemeral events will only be pushed to appservices that have opted into
+                them.
+
+                Appservices will only receive ephemeral events that fall within their
+                registered user and room namespaces.
+
+            new_token: The latest stream token.
+            users: The users that should be informed of the new event, if any.
         """
         if not self.notify_appservices:
             return
@@ -225,27 +233,38 @@ class ApplicationServicesHandler:
         stream_key: str,
         new_token: Optional[int],
         users: Collection[Union[str, UserID]],
-    ):
+    ) -> None:
         logger.debug("Checking interested services for %s" % (stream_key))
         with Measure(self.clock, "notify_interested_services_ephemeral"):
             for service in services:
                 # Only handle typing if we have the latest token
                 if stream_key == "typing_key" and new_token is not None:
+                    # Note that we don't persist the token (via set_type_stream_id_for_appservice)
+                    # for typing_key due to performance reasons and due to their highly
+                    # ephemeral nature.
+                    #
+                    # Instead we simply grab the latest typing updates in _handle_typing
+                    # and, if they apply to this application service, send it off.
                     events = await self._handle_typing(service, new_token)
                     if events:
                         self.scheduler.submit_ephemeral_events_for_as(service, events)
-                    # We don't persist the token for typing_key for performance reasons
+
                 elif stream_key == "receipt_key":
                     events = await self._handle_receipts(service)
                     if events:
                         self.scheduler.submit_ephemeral_events_for_as(service, events)
+
+                    # Persist the latest handled stream token for this appservice
                     await self.store.set_type_stream_id_for_appservice(
                         service, "read_receipt", new_token
                     )
+
                 elif stream_key == "presence_key":
                     events = await self._handle_presence(service, users)
                     if events:
                         self.scheduler.submit_ephemeral_events_for_as(service, events)
+
+                    # Persist the latest handled stream token for this appservice
                     await self.store.set_type_stream_id_for_appservice(
                         service, "presence", new_token
                     )
@@ -253,22 +272,58 @@ class ApplicationServicesHandler:
     async def _handle_typing(
         self, service: ApplicationService, new_token: int
     ) -> List[JsonDict]:
-        typing_source = self.event_sources.sources["typing"]
+        """
+        Return the typing events since the given stream token that the given application
+        service should receive.
+
+        First fetch all typing events between the given typing stream token (non-inclusive)
+        and the latest typing event stream token (inclusive). Then return only those typing
+        events that the given application service may be interested in.
+
+        Args:
+            service: The application service to check for which events it should receive.
+            new_token: A typing event stream token.
+
+        Returns:
+            A list of JSON dictionaries containing data derived from the typing events that
+            should be sent to the given application service.
+        """
+        typing_source = self.event_sources.sources.typing
         # Get the typing events from just before current
         typing, _ = await typing_source.get_new_events_as(
             service=service,
             # For performance reasons, we don't persist the previous
-            # token in the DB and instead fetch the latest typing information
+            # token in the DB and instead fetch the latest typing event
             # for appservices.
+            # TODO: It'd likely be more efficient to simply fetch the
+            #  typing event with the given 'new_token' stream token and
+            #  check if the given service was interested, rather than
+            #  iterating over all typing events and only grabbing the
+            #  latest few.
             from_key=new_token - 1,
         )
         return typing
 
     async def _handle_receipts(self, service: ApplicationService) -> List[JsonDict]:
+        """
+        Return the latest read receipts that the given application service should receive.
+
+        First fetch all read receipts between the last receipt stream token that this
+        application service should have previously received (non-inclusive) and the
+        latest read receipt stream token (inclusive). Then from that set, return only
+        those read receipts that the given application service may be interested in.
+
+        Args:
+            service: The application service to check for which events it should receive.
+
+        Returns:
+            A list of JSON dictionaries containing data derived from the read receipts that
+            should be sent to the given application service.
+        """
         from_key = await self.store.get_type_stream_id_for_appservice(
             service, "read_receipt"
         )
-        receipts_source = self.event_sources.sources["receipt"]
+        receipts_source = self.event_sources.sources.receipt
         receipts, _ = await receipts_source.get_new_events_as(
             service=service, from_key=from_key
         )
@@ -277,8 +332,24 @@ class ApplicationServicesHandler:
     async def _handle_presence(
         self, service: ApplicationService, users: Collection[Union[str, UserID]]
     ) -> List[JsonDict]:
-        events = []  # type: List[JsonDict]
-        presence_source = self.event_sources.sources["presence"]
+        """
+        Return the latest presence updates that the given application service should receive.
+
+        First, filter the given users list to those that the application service is
+        interested in. Then retrieve the latest presence updates since the
+        the last-known previously received presence stream token for the given
+        application service. Return those presence updates.
+
+        Args:
+            service: The application service that ephemeral events are being sent to.
+            users: The users that should receive the presence update.
+
+        Returns:
+            A list of json dictionaries containing data derived from the presence events
+            that should be sent to the given application service.
+        """
+        events: List[JsonDict] = []
+        presence_source = self.event_sources.sources.presence
         from_key = await self.store.get_type_stream_id_for_appservice(
             service, "presence"
         )
@@ -289,9 +360,9 @@ class ApplicationServicesHandler:
             interested = await service.is_interested_in_presence(user, self.store)
             if not interested:
                 continue
+
             presence_events, _ = await presence_source.get_new_events(
                 user=user,
-                service=service,
                 from_key=from_key,
             )
             time_now = self.clock.time_msec()
@@ -377,7 +448,7 @@ class ApplicationServicesHandler:
         self, only_protocol: Optional[str] = None
     ) -> Dict[str, JsonDict]:
         services = self.store.get_app_services()
-        protocols = {}  # type: Dict[str, List[JsonDict]]
+        protocols: Dict[str, List[JsonDict]] = {}
 
         # Collect up all the individual protocol responses out of the ASes
         for s in services:
@@ -394,9 +465,6 @@ class ApplicationServicesHandler:
                     protocols[p].append(info)
 
         def _merge_instances(infos: List[JsonDict]) -> JsonDict:
-            if not infos:
-                return {}
-
             # Merge the 'instances' lists of multiple results, but just take
             # the other fields from the first as they ought to be identical
             # copy the result so as not to corrupt the cached one
@@ -408,7 +476,9 @@ class ApplicationServicesHandler:
 
             return combined
 
-        return {p: _merge_instances(protocols[p]) for p in protocols.keys()}
+        return {
+            p: _merge_instances(protocols[p]) for p in protocols.keys() if protocols[p]
+        }
 
     async def _get_services_for_event(
         self, event: EventBase
