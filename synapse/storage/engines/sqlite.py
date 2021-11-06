@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -60,6 +59,11 @@ class Sqlite3Engine(BaseDatabaseEngine["sqlite3.Connection"]):
     def supports_using_any_list(self):
         """Do we support using `a = ANY(?)` and passing a list"""
         return False
+
+    @property
+    def supports_returning(self) -> bool:
+        """Do we support the `RETURNING` clause in insert/update/delete?"""
+        return self.module.sqlite_version_info >= (3, 35, 0)
 
     def check_database(self, db_conn, allow_outdated_version: bool = False):
         if not allow_outdated_version:

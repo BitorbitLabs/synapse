@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 # Copyright 2018-2019 New Vector Ltd
 #
@@ -18,14 +17,16 @@ import logging
 from typing import TYPE_CHECKING, Tuple
 
 from synapse.api.errors import AuthError, Codes, NotFoundError, SynapseError
-from synapse.http.servlet import RestServlet, parse_boolean, parse_integer
+from synapse.http.server import HttpServer
+from synapse.http.servlet import RestServlet, parse_boolean, parse_integer, parse_string
 from synapse.http.site import SynapseRequest
 from synapse.rest.admin._base import (
     admin_patterns,
     assert_requester_is_admin,
     assert_user_is_admin,
 )
-from synapse.types import JsonDict
+from synapse.storage.databases.main.media_repository import MediaSortOrder
+from synapse.types import JsonDict, UserID
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -38,12 +39,11 @@ class QuarantineMediaInRoom(RestServlet):
     this server.
     """
 
-    PATTERNS = (
-        admin_patterns("/room/(?P<room_id>[^/]+)/media/quarantine")
-        +
+    PATTERNS = [
+        *admin_patterns("/room/(?P<room_id>[^/]+)/media/quarantine$"),
         # This path kept around for legacy reasons
-        admin_patterns("/quarantine_media/(?P<room_id>[^/]+)")
-    )
+        *admin_patterns("/quarantine_media/(?P<room_id>[^/]+)"),
+    ]
 
     def __init__(self, hs: "HomeServer"):
         self.store = hs.get_datastore()
@@ -70,7 +70,7 @@ class QuarantineMediaByUser(RestServlet):
     this server.
     """
 
-    PATTERNS = admin_patterns("/user/(?P<user_id>[^/]+)/media/quarantine")
+    PATTERNS = admin_patterns("/user/(?P<user_id>[^/]+)/media/quarantine$")
 
     def __init__(self, hs: "HomeServer"):
         self.store = hs.get_datastore()
@@ -121,6 +121,35 @@ class QuarantineMediaByID(RestServlet):
         return 200, {}
 
 
+class UnquarantineMediaByID(RestServlet):
+    """Quarantines local or remote media by a given ID so that no one can download
+    it via this server.
+    """
+
+    PATTERNS = admin_patterns(
+        "/media/unquarantine/(?P<server_name>[^/]+)/(?P<media_id>[^/]+)"
+    )
+
+    def __init__(self, hs: "HomeServer"):
+        self.store = hs.get_datastore()
+        self.auth = hs.get_auth()
+
+    async def on_POST(
+        self, request: SynapseRequest, server_name: str, media_id: str
+    ) -> Tuple[int, JsonDict]:
+        requester = await self.auth.get_user_by_req(request)
+        await assert_user_is_admin(self.auth, requester.user)
+
+        logging.info(
+            "Remove from quarantine local media by ID: %s/%s", server_name, media_id
+        )
+
+        # Remove from quarantine this media id
+        await self.store.quarantine_media_by_id(server_name, media_id, None)
+
+        return 200, {}
+
+
 class ProtectMediaByID(RestServlet):
     """Protect local media from being quarantined."""
 
@@ -138,8 +167,31 @@ class ProtectMediaByID(RestServlet):
 
         logging.info("Protecting local media by ID: %s", media_id)
 
-        # Quarantine this media id
-        await self.store.mark_local_media_as_safe(media_id)
+        # Protect this media id
+        await self.store.mark_local_media_as_safe(media_id, safe=True)
+
+        return 200, {}
+
+
+class UnprotectMediaByID(RestServlet):
+    """Unprotect local media from being quarantined."""
+
+    PATTERNS = admin_patterns("/media/unprotect/(?P<media_id>[^/]+)")
+
+    def __init__(self, hs: "HomeServer"):
+        self.store = hs.get_datastore()
+        self.auth = hs.get_auth()
+
+    async def on_POST(
+        self, request: SynapseRequest, media_id: str
+    ) -> Tuple[int, JsonDict]:
+        requester = await self.auth.get_user_by_req(request)
+        await assert_user_is_admin(self.auth, requester.user)
+
+        logging.info("Unprotecting local media by ID: %s", media_id)
+
+        # Unprotect this media id
+        await self.store.mark_local_media_as_safe(media_id, safe=False)
 
         return 200, {}
 
@@ -147,7 +199,7 @@ class ProtectMediaByID(RestServlet):
 class ListMediaInRoom(RestServlet):
     """Lists all of the media in a given room."""
 
-    PATTERNS = admin_patterns("/room/(?P<room_id>[^/]+)/media")
+    PATTERNS = admin_patterns("/room/(?P<room_id>[^/]+)/media$")
 
     def __init__(self, hs: "HomeServer"):
         self.store = hs.get_datastore()
@@ -167,7 +219,7 @@ class ListMediaInRoom(RestServlet):
 
 
 class PurgeMediaCacheRestServlet(RestServlet):
-    PATTERNS = admin_patterns("/purge_media_cache")
+    PATTERNS = admin_patterns("/purge_media_cache$")
 
     def __init__(self, hs: "HomeServer"):
         self.media_repository = hs.get_media_repository()
@@ -178,6 +230,20 @@ class PurgeMediaCacheRestServlet(RestServlet):
 
         before_ts = parse_integer(request, "before_ts", required=True)
         logger.info("before_ts: %r", before_ts)
+
+        if before_ts < 0:
+            raise SynapseError(
+                400,
+                "Query parameter before_ts must be a positive integer.",
+                errcode=Codes.INVALID_PARAM,
+            )
+        elif before_ts < 30000000000:  # Dec 1970 in milliseconds, Aug 2920 in seconds
+            raise SynapseError(
+                400,
+                "Query parameter before_ts you provided is from the year 1970. "
+                + "Double check that you are providing a timestamp in milliseconds.",
+                errcode=Codes.INVALID_PARAM,
+            )
 
         ret = await self.media_repository.delete_old_remote_media(before_ts)
 
@@ -208,7 +274,9 @@ class DeleteMediaByID(RestServlet):
 
         logging.info("Deleting local media by ID: %s", media_id)
 
-        deleted_media, total = await self.media_repository.delete_local_media(media_id)
+        deleted_media, total = await self.media_repository.delete_local_media_ids(
+            [media_id]
+        )
         return 200, {"deleted_media": deleted_media, "total": total}
 
 
@@ -217,7 +285,7 @@ class DeleteMediaByDateSize(RestServlet):
     timestamp and size.
     """
 
-    PATTERNS = admin_patterns("/media/(?P<server_name>[^/]+)/delete")
+    PATTERNS = admin_patterns("/media/(?P<server_name>[^/]+)/delete$")
 
     def __init__(self, hs: "HomeServer"):
         self.store = hs.get_datastore()
@@ -237,7 +305,14 @@ class DeleteMediaByDateSize(RestServlet):
         if before_ts < 0:
             raise SynapseError(
                 400,
-                "Query parameter before_ts must be a string representing a positive integer.",
+                "Query parameter before_ts must be a positive integer.",
+                errcode=Codes.INVALID_PARAM,
+            )
+        elif before_ts < 30000000000:  # Dec 1970 in milliseconds, Aug 2920 in seconds
+            raise SynapseError(
+                400,
+                "Query parameter before_ts you provided is from the year 1970. "
+                + "Double check that you are providing a timestamp in milliseconds.",
                 errcode=Codes.INVALID_PARAM,
             )
         if size_gt < 0:
@@ -261,15 +336,177 @@ class DeleteMediaByDateSize(RestServlet):
         return 200, {"deleted_media": deleted_media, "total": total}
 
 
-def register_servlets_for_media_repo(hs: "HomeServer", http_server):
+class UserMediaRestServlet(RestServlet):
+    """
+    Gets information about all uploaded local media for a specific `user_id`.
+    With DELETE request you can delete all this media.
+
+    Example:
+        http://localhost:8008/_synapse/admin/v1/users/@user:server/media
+
+    Args:
+        The parameters `from` and `limit` are required for pagination.
+        By default, a `limit` of 100 is used.
+    Returns:
+        A list of media and an integer representing the total number of
+        media that exist given for this user
+    """
+
+    PATTERNS = admin_patterns("/users/(?P<user_id>[^/]+)/media$")
+
+    def __init__(self, hs: "HomeServer"):
+        self.is_mine = hs.is_mine
+        self.auth = hs.get_auth()
+        self.store = hs.get_datastore()
+        self.media_repository = hs.get_media_repository()
+
+    async def on_GET(
+        self, request: SynapseRequest, user_id: str
+    ) -> Tuple[int, JsonDict]:
+        # This will always be set by the time Twisted calls us.
+        assert request.args is not None
+
+        await assert_requester_is_admin(self.auth, request)
+
+        if not self.is_mine(UserID.from_string(user_id)):
+            raise SynapseError(400, "Can only look up local users")
+
+        user = await self.store.get_user_by_id(user_id)
+        if user is None:
+            raise NotFoundError("Unknown user")
+
+        start = parse_integer(request, "from", default=0)
+        limit = parse_integer(request, "limit", default=100)
+
+        if start < 0:
+            raise SynapseError(
+                400,
+                "Query parameter from must be a string representing a positive integer.",
+                errcode=Codes.INVALID_PARAM,
+            )
+
+        if limit < 0:
+            raise SynapseError(
+                400,
+                "Query parameter limit must be a string representing a positive integer.",
+                errcode=Codes.INVALID_PARAM,
+            )
+
+        # If neither `order_by` nor `dir` is set, set the default order
+        # to newest media is on top for backward compatibility.
+        if b"order_by" not in request.args and b"dir" not in request.args:
+            order_by = MediaSortOrder.CREATED_TS.value
+            direction = "b"
+        else:
+            order_by = parse_string(
+                request,
+                "order_by",
+                default=MediaSortOrder.CREATED_TS.value,
+                allowed_values=(
+                    MediaSortOrder.MEDIA_ID.value,
+                    MediaSortOrder.UPLOAD_NAME.value,
+                    MediaSortOrder.CREATED_TS.value,
+                    MediaSortOrder.LAST_ACCESS_TS.value,
+                    MediaSortOrder.MEDIA_LENGTH.value,
+                    MediaSortOrder.MEDIA_TYPE.value,
+                    MediaSortOrder.QUARANTINED_BY.value,
+                    MediaSortOrder.SAFE_FROM_QUARANTINE.value,
+                ),
+            )
+            direction = parse_string(
+                request, "dir", default="f", allowed_values=("f", "b")
+            )
+
+        media, total = await self.store.get_local_media_by_user_paginate(
+            start, limit, user_id, order_by, direction
+        )
+
+        ret = {"media": media, "total": total}
+        if (start + limit) < total:
+            ret["next_token"] = start + len(media)
+
+        return 200, ret
+
+    async def on_DELETE(
+        self, request: SynapseRequest, user_id: str
+    ) -> Tuple[int, JsonDict]:
+        # This will always be set by the time Twisted calls us.
+        assert request.args is not None
+
+        await assert_requester_is_admin(self.auth, request)
+
+        if not self.is_mine(UserID.from_string(user_id)):
+            raise SynapseError(400, "Can only look up local users")
+
+        user = await self.store.get_user_by_id(user_id)
+        if user is None:
+            raise NotFoundError("Unknown user")
+
+        start = parse_integer(request, "from", default=0)
+        limit = parse_integer(request, "limit", default=100)
+
+        if start < 0:
+            raise SynapseError(
+                400,
+                "Query parameter from must be a string representing a positive integer.",
+                errcode=Codes.INVALID_PARAM,
+            )
+
+        if limit < 0:
+            raise SynapseError(
+                400,
+                "Query parameter limit must be a string representing a positive integer.",
+                errcode=Codes.INVALID_PARAM,
+            )
+
+        # If neither `order_by` nor `dir` is set, set the default order
+        # to newest media is on top for backward compatibility.
+        if b"order_by" not in request.args and b"dir" not in request.args:
+            order_by = MediaSortOrder.CREATED_TS.value
+            direction = "b"
+        else:
+            order_by = parse_string(
+                request,
+                "order_by",
+                default=MediaSortOrder.CREATED_TS.value,
+                allowed_values=(
+                    MediaSortOrder.MEDIA_ID.value,
+                    MediaSortOrder.UPLOAD_NAME.value,
+                    MediaSortOrder.CREATED_TS.value,
+                    MediaSortOrder.LAST_ACCESS_TS.value,
+                    MediaSortOrder.MEDIA_LENGTH.value,
+                    MediaSortOrder.MEDIA_TYPE.value,
+                    MediaSortOrder.QUARANTINED_BY.value,
+                    MediaSortOrder.SAFE_FROM_QUARANTINE.value,
+                ),
+            )
+            direction = parse_string(
+                request, "dir", default="f", allowed_values=("f", "b")
+            )
+
+        media, _ = await self.store.get_local_media_by_user_paginate(
+            start, limit, user_id, order_by, direction
+        )
+
+        deleted_media, total = await self.media_repository.delete_local_media_ids(
+            ([row["media_id"] for row in media])
+        )
+
+        return 200, {"deleted_media": deleted_media, "total": total}
+
+
+def register_servlets_for_media_repo(hs: "HomeServer", http_server: HttpServer) -> None:
     """
     Media repo specific APIs.
     """
     PurgeMediaCacheRestServlet(hs).register(http_server)
     QuarantineMediaInRoom(hs).register(http_server)
     QuarantineMediaByID(hs).register(http_server)
+    UnquarantineMediaByID(hs).register(http_server)
     QuarantineMediaByUser(hs).register(http_server)
     ProtectMediaByID(hs).register(http_server)
+    UnprotectMediaByID(hs).register(http_server)
     ListMediaInRoom(hs).register(http_server)
     DeleteMediaByID(hs).register(http_server)
     DeleteMediaByDateSize(hs).register(http_server)
+    UserMediaRestServlet(hs).register(http_server)

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 # Copyright 2020-2021 The Matrix.org Foundation C.I.C.
 #
@@ -14,10 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 
 from synapse.storage._base import SQLBaseStore
 from synapse.storage.database import DatabasePool
+
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 BG_UPDATE_REMOVE_MEDIA_REPO_INDEX_WITHOUT_METHOD = (
     "media_repository_drop_index_wo_method"
@@ -44,7 +46,7 @@ class MediaSortOrder(Enum):
 
 
 class MediaRepositoryBackgroundUpdateStore(SQLBaseStore):
-    def __init__(self, database: DatabasePool, db_conn, hs):
+    def __init__(self, database: DatabasePool, db_conn, hs: "HomeServer"):
         super().__init__(database, db_conn, hs)
 
         self.db_pool.updates.register_background_index_update(
@@ -124,7 +126,7 @@ class MediaRepositoryBackgroundUpdateStore(SQLBaseStore):
 class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
     """Persistence for attachments and avatars"""
 
-    def __init__(self, database: DatabasePool, db_conn, hs):
+    def __init__(self, database: DatabasePool, db_conn, hs: "HomeServer"):
         super().__init__(database, db_conn, hs)
         self.server_name = hs.hostname
 
@@ -144,6 +146,7 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
                 "created_ts",
                 "quarantined_by",
                 "url_cache",
+                "safe_from_quarantine",
             ),
             allow_none=True,
             desc="get_local_media",
@@ -297,12 +300,12 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
             desc="store_local_media",
         )
 
-    async def mark_local_media_as_safe(self, media_id: str) -> None:
-        """Mark a local media as safe from quarantining."""
+    async def mark_local_media_as_safe(self, media_id: str, safe: bool = True) -> None:
+        """Mark a local media as safe or unsafe from quarantining."""
         await self.db_pool.simple_update_one(
             table="local_media_repository",
             keyvalues={"media_id": media_id},
-            updatevalues={"safe_from_quarantine": True},
+            updatevalues={"safe_from_quarantine": safe},
             desc="mark_local_media_as_safe",
         )
 

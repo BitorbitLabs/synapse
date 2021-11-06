@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,8 +13,9 @@
 # limitations under the License.
 
 import logging
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
+from synapse.logging import issue9533_logger
 from synapse.logging.opentracing import log_kv, set_tag, trace
 from synapse.replication.tcp.streams import ToDeviceStream
 from synapse.storage._base import SQLBaseStore, db_to_json
@@ -26,11 +26,14 @@ from synapse.util import json_encoder
 from synapse.util.caches.expiringcache import ExpiringCache
 from synapse.util.caches.stream_change_cache import StreamChangeCache
 
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
+
 logger = logging.getLogger(__name__)
 
 
 class DeviceInboxWorkerStore(SQLBaseStore):
-    def __init__(self, database: DatabasePool, db_conn, hs):
+    def __init__(self, database: DatabasePool, db_conn, hs: "HomeServer"):
         super().__init__(database, db_conn, hs)
 
         self._instance_name = hs.get_instance_name()
@@ -136,7 +139,7 @@ class DeviceInboxWorkerStore(SQLBaseStore):
             user_id, last_stream_id
         )
         if not has_changed:
-            return ([], current_stream_id)
+            return [], current_stream_id
 
         def get_new_messages_for_device_txn(txn):
             sql = (
@@ -203,9 +206,7 @@ class DeviceInboxWorkerStore(SQLBaseStore):
             "delete_messages_for_device", delete_messages_for_device_txn
         )
 
-        log_kv(
-            {"message": "deleted {} messages for device".format(count), "count": count}
-        )
+        log_kv({"message": f"deleted {count} messages for device", "count": count})
 
         # Update the cache, ensuring that we only ever increase the value
         last_deleted_stream_id = self._last_device_delete_cache.get(
@@ -242,11 +243,11 @@ class DeviceInboxWorkerStore(SQLBaseStore):
         )
         if not has_changed or last_stream_id == current_stream_id:
             log_kv({"message": "No new messages in stream"})
-            return ([], current_stream_id)
+            return [], current_stream_id
 
         if limit <= 0:
             # This can happen if we run out of room for EDUs in the transaction.
-            return ([], last_stream_id)
+            return [], last_stream_id
 
         @trace
         def get_new_messages_for_remote_destination_txn(txn):
@@ -405,6 +406,13 @@ class DeviceInboxWorkerStore(SQLBaseStore):
                 ],
             )
 
+            if remote_messages_by_destination:
+                issue9533_logger.debug(
+                    "Queued outgoing to-device messages with stream_id %i for %s",
+                    stream_id,
+                    list(remote_messages_by_destination.keys()),
+                )
+
         async with self._device_inbox_id_gen.get_next() as stream_id:
             now_ms = self.clock.time_msec()
             await self.db_pool.runInteraction(
@@ -534,11 +542,21 @@ class DeviceInboxWorkerStore(SQLBaseStore):
             ],
         )
 
+        issue9533_logger.debug(
+            "Stored to-device messages with stream_id %i for %s",
+            stream_id,
+            [
+                (user_id, device_id)
+                for (user_id, messages_by_device) in local_by_user_then_device.items()
+                for device_id in messages_by_device.keys()
+            ],
+        )
+
 
 class DeviceInboxBackgroundUpdateStore(SQLBaseStore):
     DEVICE_INBOX_STREAM_ID = "device_inbox_stream_drop"
 
-    def __init__(self, database: DatabasePool, db_conn, hs):
+    def __init__(self, database: DatabasePool, db_conn, hs: "HomeServer"):
         super().__init__(database, db_conn, hs)
 
         self.db_pool.updates.register_background_index_update(

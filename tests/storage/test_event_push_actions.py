@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2016-2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -70,6 +69,7 @@ class EventPushActionsStoreTestCase(HomeserverTestCase):
             event.room_id = room_id
             event.event_id = "$test:example.com"
             event.internal_metadata.stream_ordering = stream
+            event.internal_metadata.is_outlier.return_value = False
             event.depth = stream
 
             self.get_success(

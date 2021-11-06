@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2020 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -76,9 +75,18 @@ class MessageAcceptTests(unittest.HomeserverTestCase):
         )
 
         self.handler = self.homeserver.get_federation_handler()
-        self.handler.do_auth = lambda origin, event, context, auth_events: succeed(
-            context
-        )
+        federation_event_handler = self.homeserver.get_federation_event_handler()
+
+        async def _check_event_auth(
+            origin,
+            event,
+            context,
+            state=None,
+            backfilled=False,
+        ):
+            return context
+
+        federation_event_handler._check_event_auth = _check_event_auth
         self.client = self.homeserver.get_federation_client()
         self.client._check_sigs_and_hash_and_fetch = lambda dest, pdus, **k: succeed(
             pdus
@@ -87,9 +95,7 @@ class MessageAcceptTests(unittest.HomeserverTestCase):
         # Send the join, it should return None (which is not an error)
         self.assertEqual(
             self.get_success(
-                self.handler.on_receive_pdu(
-                    "test.serv", join_event, sent_to_us_directly=True
-                )
+                federation_event_handler.on_receive_pdu("test.serv", join_event)
             ),
             None,
         )
@@ -134,11 +140,10 @@ class MessageAcceptTests(unittest.HomeserverTestCase):
             }
         )
 
+        federation_event_handler = self.homeserver.get_federation_event_handler()
         with LoggingContext("test-context"):
             failure = self.get_failure(
-                self.handler.on_receive_pdu(
-                    "test.serv", lying_event, sent_to_us_directly=True
-                ),
+                federation_event_handler.on_receive_pdu("test.serv", lying_event),
                 FederationError,
             )
 

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -42,9 +41,8 @@ class ApplicationServiceStoreTestCase(unittest.TestCase):
             self.addCleanup, federation_sender=Mock(), federation_client=Mock()
         )
 
-        hs.config.app_service_config_files = self.as_yaml_files
+        hs.config.appservice.app_service_config_files = self.as_yaml_files
         hs.config.caches.event_cache_size = 1
-        hs.config.password_providers = []
 
         self.as_token = "token1"
         self.as_url = "some_url"
@@ -109,9 +107,8 @@ class ApplicationServiceTransactionStoreTestCase(unittest.TestCase):
             self.addCleanup, federation_sender=Mock(), federation_client=Mock()
         )
 
-        hs.config.app_service_config_files = self.as_yaml_files
+        hs.config.appservice.app_service_config_files = self.as_yaml_files
         hs.config.caches.event_cache_size = 1
-        hs.config.password_providers = []
 
         self.as_list = [
             {"token": "token1", "url": "https://matrix-as.org", "id": "id_1"},
@@ -129,7 +126,7 @@ class ApplicationServiceTransactionStoreTestCase(unittest.TestCase):
         self.db_pool = database._db_pool
         self.engine = database.engine
 
-        db_config = hs.config.get_single_database()
+        db_config = hs.config.database.get_single_database()
         self.store = TestTransactionStore(
             database, make_conn(db_config, self.engine, "test"), hs
         )
@@ -497,9 +494,8 @@ class ApplicationServiceStoreConfigTestCase(unittest.TestCase):
             self.addCleanup, federation_sender=Mock(), federation_client=Mock()
         )
 
-        hs.config.app_service_config_files = [f1, f2]
+        hs.config.appservice.app_service_config_files = [f1, f2]
         hs.config.caches.event_cache_size = 1
-        hs.config.password_providers = []
 
         database = hs.get_datastores().databases[0]
         ApplicationServiceStore(
@@ -515,9 +511,8 @@ class ApplicationServiceStoreConfigTestCase(unittest.TestCase):
             self.addCleanup, federation_sender=Mock(), federation_client=Mock()
         )
 
-        hs.config.app_service_config_files = [f1, f2]
+        hs.config.appservice.app_service_config_files = [f1, f2]
         hs.config.caches.event_cache_size = 1
-        hs.config.password_providers = []
 
         with self.assertRaises(ConfigError) as cm:
             database = hs.get_datastores().databases[0]
@@ -541,9 +536,8 @@ class ApplicationServiceStoreConfigTestCase(unittest.TestCase):
             self.addCleanup, federation_sender=Mock(), federation_client=Mock()
         )
 
-        hs.config.app_service_config_files = [f1, f2]
+        hs.config.appservice.app_service_config_files = [f1, f2]
         hs.config.caches.event_cache_size = 1
-        hs.config.password_providers = []
 
         with self.assertRaises(ConfigError) as cm:
             database = hs.get_datastores().databases[0]

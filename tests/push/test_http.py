@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2018 New Vector
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,8 +18,7 @@ from twisted.internet.defer import Deferred
 import synapse.rest.admin
 from synapse.logging.context import make_deferred_yieldable
 from synapse.push import PusherConfigException
-from synapse.rest.client.v1 import login, room
-from synapse.rest.client.v2_alpha import receipts
+from synapse.rest.client import login, receipts, room
 
 from tests.unittest import HomeserverTestCase, override_config
 

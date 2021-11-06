@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -38,7 +37,7 @@ class CasConfig(Config):
 
             # The public baseurl is required because it is used by the redirect
             # template.
-            public_baseurl = self.public_baseurl
+            public_baseurl = self.root.server.public_baseurl
             if not public_baseurl:
                 raise ConfigError("cas_config requires a public_baseurl to be set")
 

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2019 Matrix.org Foundation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,7 +16,7 @@ from unittest.mock import Mock
 
 from synapse.api.errors import Codes, SynapseError
 from synapse.rest import admin
-from synapse.rest.client.v1 import login, room
+from synapse.rest.client import login, room
 from synapse.types import UserID
 
 from tests import unittest
