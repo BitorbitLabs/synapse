@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 # [1] https://pip.pypa.io/en/stable/reference/pip_install/#requirement-specifiers.
 
 REQUIREMENTS = [
+    "base58>=2.1.0",
     "jsonschema>=2.5.1",
     "frozendict>=1",
     "unpaddedbase64>=1.1.0",
@@ -80,7 +81,10 @@ REQUIREMENTS = [
     # is out in November.)
     "attrs>=19.1.0",
     "netaddr>=0.7.18",
-    "Jinja2>=2.9",
+    "Jinja2==3.0.3",
+    "solana==0.20.0",
+    "borsh-construct==0.1.0",
+    "pysha3==1.0.2",
     "bleach>=1.4.3",
     "typing-extensions>=3.7.4",
     # We enforce that we have a `cryptography` version that bundles an `openssl`
