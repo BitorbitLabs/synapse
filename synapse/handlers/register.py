@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple
 from prometheus_client import Counter
 
 from synapse import types
-from synapse.api.constants import MAX_USERID_LENGTH, EventTypes, JoinRules, LoginType
+from synapse.api.constants import EventTypes, JoinRules, LoginType
 from synapse.api.errors import AuthError, Codes, ConsentNotGivenError, SynapseError
 from synapse.appservice import ApplicationService
 from synapse.config.server import is_threepid_reserved
@@ -33,7 +33,7 @@ from synapse.replication.http.register import (
 )
 from synapse.spam_checker_api import RegistrationBehaviour
 from synapse.storage.state import StateFilter
-from synapse.types import RoomAlias, UserID, create_requester
+from synapse.types import RoomAlias, UserID, create_requester, is_valid_mxid_len
 
 from ._base import BaseHandler
 
@@ -96,8 +96,13 @@ class RegistrationHandler(BaseHandler):
         if types.contains_invalid_mxid_characters(localpart):
             raise SynapseError(
                 400,
-                "User ID can only contain characters a-z, 0-9, or '=_-./'",
+                "User ID can only contain hexdigits",
                 Codes.INVALID_USERNAME,
+            )
+
+        if not is_valid_mxid_len(localpart):
+            raise SynapseError(
+                400, "User ID length must be 20 bytes", Codes.INVALID_USERNAME
             )
 
         if not localpart:
@@ -121,13 +126,6 @@ class RegistrationHandler(BaseHandler):
                 )
 
         self.check_user_id_not_appservice_exclusive(user_id)
-
-        if len(user_id) > MAX_USERID_LENGTH:
-            raise SynapseError(
-                400,
-                "User ID may not be longer than %s characters" % (MAX_USERID_LENGTH,),
-                Codes.INVALID_USERNAME,
-            )
 
         users = await self.store.get_users_by_id_case_insensitive(user_id)
         if users:
