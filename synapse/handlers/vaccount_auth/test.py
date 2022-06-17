@@ -46,7 +46,7 @@ def register_account(homeserver_api_url):
     evm_address = get_vaccount_evm_address(vaccount)
 
     payload = {
-        'type': 'm.login.vaccount',
+        'type': 'com.bitorbit.login.vaccount',
         'user': '@' + evm_address + ':my.domain.name',
         'vaccount_address': vaccount.to_base58().decode(),
         'signature': signature.signature.hex(),

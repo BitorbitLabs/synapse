@@ -26,6 +26,7 @@ from twisted.internet import defer
 from solana.publickey import PublicKey
 from nacl.signing import VerifyKey
 from nacl.exceptions import BadSignatureError
+from redis import Redis
 
 import logging
 
@@ -47,12 +48,12 @@ class VaccountAuthProvider:
     def __init__(self, config, account_handler: ModuleApi):
         self.account_handler = account_handler
         self.store: DataStore = account_handler._hs.get_datastore()
-        self.last_tonce = int(account_handler._hs.get_clock().time())
+        self.redis = Redis()
 
     @staticmethod
     def get_supported_login_types():
         supported_login_types = {
-            'm.login.vaccount': (
+            'com.bitorbit.login.vaccount': (
                 'vaccount_address',
                 'signature',
                 'signer',
@@ -69,7 +70,7 @@ class VaccountAuthProvider:
         Args:
             evm_vaccount_address: ethereum based interpretation of the Vaccount address
             login_type: type of authentication
-            login_dict: authentication parameters `supported_login_types
+            login_dict: authentication parameters `supported_login_types`
 
         Returns:
             Canonical user ID if authentication was successful
@@ -82,9 +83,6 @@ class VaccountAuthProvider:
         display_name = login_dict.get('displayname')
 
         if not signature or not signer_key or not signed_timestamp or not vaccount_address or not signer_type:
-            return False
-
-        if not self._is_valid_sign_timestamp(signed_timestamp):
             return False
 
         if evm_vaccount_address.startswith("@") and ":" in evm_vaccount_address:
@@ -113,6 +111,9 @@ class VaccountAuthProvider:
         is_valid_evm_address = expected_evm_address == evm_vaccount_address
 
         if not is_valid_signature or not is_active_vaccount or not is_valid_evm_address:
+            return False
+
+        if not self._is_valid_sign_timestamp(evm_vaccount_address, signed_timestamp):
             return False
 
         user_id = self.account_handler.get_qualified_user_id(username=evm_vaccount_address)
@@ -151,7 +152,7 @@ class VaccountAuthProvider:
         # await self.store.set_e2e_cross_signing_key(
         #     user_id, "master", vaccount_signing_key
         # )
-        self.last_tonce = signed_timestamp
+        self._commit_last_sign_timestamp(evm_vaccount_address, signed_timestamp)
 
         return user_id
 
@@ -167,16 +168,19 @@ class VaccountAuthProvider:
 
         return True
 
-    def _is_valid_sign_timestamp(self, signed_timestamp: int):
+    def _is_valid_sign_timestamp(self, evm_vaccount_address: str, signed_timestamp: int):
         """Check if signed timestamp is valid
         Args:
-           signed_tonce: signed timestamp
+            evm_vaccount_address: ethereum representing of the VA address
+            signed_timestamp: last signed timestamp by VA key
         Returns:
             True if timestamp is greater than last signed timestamp
         """
         current_timestamp = int(self.account_handler._hs.get_clock().time())
-        ts_window = current_timestamp - signed_timestamp 
-        if signed_timestamp >= self.last_tonce and ts_window <= SIGN_TIMESTAMP_TOLERANCE:
+        ts_window = current_timestamp - signed_timestamp
+        last_signed_timestamp = self.redis.get(evm_vaccount_address) or signed_timestamp
+
+        if signed_timestamp >= int(last_signed_timestamp) and ts_window <= SIGN_TIMESTAMP_TOLERANCE:
             return True
 
         return False
@@ -201,7 +205,7 @@ class VaccountAuthProvider:
             displayname=displayname,
         )
 
-        logger.info(f"Registration was successful: {user_id}, timestamp: {self.last_tonce}")
+        logger.info(f"Registration was successful: {user_id}")
         return user_id
 
     async def _is_active_vaccount(self, vaccount_address: PublicKey, signer: PublicKey, signer_type: str) -> bool:
@@ -250,6 +254,15 @@ class VaccountAuthProvider:
         account_data = account_data.get('result').get('value').get('data').get('parsed').get('info')
 
         return account_data
+
+    def _commit_last_sign_timestamp(self, evm_vaccount_address, last_timestamp):
+        is_commit = self.redis.set(
+            name=evm_vaccount_address,
+            value=last_timestamp,
+            # ex=SIGN_TIMESTAMP_TOLERANCE,
+        )
+
+        return is_commit
 
     @staticmethod
     def parse_config(config):

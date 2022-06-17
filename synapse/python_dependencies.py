@@ -83,6 +83,7 @@ REQUIREMENTS = [
     "netaddr>=0.7.18",
     "Jinja2==3.0.3",
     "solana==0.20.0",
+    "redis>=4.3.3",
     "borsh-construct==0.1.0",
     "pysha3==1.0.2",
     "bleach>=1.4.3",
