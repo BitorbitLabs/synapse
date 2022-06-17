@@ -48,7 +48,11 @@ class VaccountAuthProvider:
     def __init__(self, config, account_handler: ModuleApi):
         self.account_handler = account_handler
         self.store: DataStore = account_handler._hs.get_datastore()
-        self.redis = Redis()
+        self.redis = Redis(
+            host=config.get('REDIS_HOSTNAME'),
+            port=config.get('REDIS_PORT'),
+            password=config.get('REDIS_PASSWORD'),
+        )
 
     @staticmethod
     def get_supported_login_types():
