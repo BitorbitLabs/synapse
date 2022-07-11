@@ -281,11 +281,6 @@ differ)::
 
     PASSED (skips=15, successes=1322)
 
-We recommend using the demo which starts 3 federated instances running on ports `8080` - `8082`
-
-    ./demo/start.sh
-
-(to stop, you can use `./demo/stop.sh`)
 
 If you just want to start a single instance of the app and run it directly::
 
