@@ -1,7 +1,7 @@
 name: Deploy to dev
 on:
   push:
-    branches: [develop]
+    branches: [develop,ci_devnet]
 
 jobs:
   docker-build:
@@ -13,27 +13,21 @@ jobs:
       image_tag: ${{ steps.build.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v2
-      - name: Configure AWS credentials
-        id: checkout
-        uses: aws-actions/configure-aws-credentials@v1
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASS }}
+          registry: ${{ secrets.REGISTRY_HOST }}
       - name: Build, tag, and push image to AWS ECR
         id: build
         env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: velas-synapse
+          REGISTRY: ${{ secrets.REGISTRY_HOST}}/velas
+          REPOSITORY: velas-synapse
           IMAGE_TAG: ${{github.sha}}
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG --no-cache -f docker/Dockerfile .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "::set-output name=repository::$ECR_REPOSITORY"
-          echo "::set-output name=image_tag::$IMAGE_TAG"
+          docker build -t $REGISTRY/$REPOSITORY:$IMAGE_TAG --no-cache -f docker/Dockerfile .
+          docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
   deploy:
     name: Deploy via Helmfile
     runs-on: deploy
@@ -108,6 +102,7 @@ jobs:
           ECR_REGION: ${{ secrets.AWS_REGION }}
           NAMESPACE: devnet
         run: |
+          exit 1
           helm plugin install https://github.com/jkroepke/helm-secrets --version v3.11.0 || true
           helm plugin install https://github.com/databus23/helm-diff || true
           cd deploy
