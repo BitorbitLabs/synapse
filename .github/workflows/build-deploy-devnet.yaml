@@ -30,45 +30,6 @@ jobs:
           docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
   deploy:
     name: Deploy via Helmfile
-    runs-on: deploy
-    needs: docker-build-push
-    steps:
-      - name: Configure AWS credentials
-        id: checkout
-        uses: aws-actions/configure-aws-credentials@v1
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
-      - name: Setup helmfile
-        uses: mamezou-tech/setup-helmfile@v0.6.0
-        with:
-          helmfile-version: "v0.131.0"
-      - name: Check out velas-infra
-        uses: actions/checkout@master
-        with:
-          repository: velas/velas-infra
-          ssh-key: ${{ secrets.INFRA_SSH_KEY }}
-      - name: Deploy via helmfile
-        id: deploy
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ needs.docker-build-push.outputs.repository }}
-          IMAGE_TAG: ${{ needs.docker-build-push.outputs.image_tag }}
-          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA_DEV }}
-          NAMESPACE: devnet
-        run: |
-          if [ `helm plugin list|grep diff|wc -l` -eq '0' ]; then helm plugin install https://github.com/databus23/helm-diff ; fi
-          if [ ${GITHUB_REF##*/} = 'master' ]; then NAMESPACE=default; fi
-          mkdir -p ~/.kube && echo $KUBE_CONFIG_DATA|base64 --decode > ~/.kube/config
-          cd deploy
-          helmfile -e dev -l namespace=${NAMESPACE},name=velas-synapse apply  --set image.tag=$IMAGE_TAG,image.repository=$ECR_REGISTRY/$ECR_REPOSITORY --skip-deps
-
-  deploy:
-    name: Deploy via Helmfile
     runs-on: deployer
     needs: docker-build
     container:
