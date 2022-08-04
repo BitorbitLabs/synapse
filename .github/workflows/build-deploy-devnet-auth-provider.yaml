@@ -4,8 +4,8 @@ on:
     branches: [feature/vaccount_auth_provider]
 
 env: 
-  APP_NAME: velas-synapse-auth-provider
-  APP_REPO: velas-synapse
+  APP_NAME: bitorbit-synapse-auth-provider
+  APP_REPO: bitorbit-synapse
  
 jobs:
   docker-build:
@@ -19,7 +19,7 @@ jobs:
       - name: Build, tag, and push image 
         id: build
         env:
-          REGISTRY: ${{ secrets.REGISTRY_HOST }}/velas
+          REGISTRY: ${{ secrets.REGISTRY_HOST }}/bitorbit
           REPOSITORY: ${{ env.APP_REPO }}
           IMAGE_TAG: ${{github.sha}}
         run: |
@@ -30,16 +30,16 @@ jobs:
     runs-on: devnet-services
     needs: docker-build
     steps:
-      - name: Check out velas-infra
+      - name: Check out bitorbit-infra
         uses: actions/checkout@master
         with:
-          repository: velas/velas-infra
+          repository: BitorbitLabs/bitorbit-infra
           ref: master
           ssh-key: ${{ secrets.SSH_KEY_INFRA }}
       - name: Deploy via helmfile
         id: deploy
         env:
-          REGISTRY: ${{ secrets.REGISTRY_HOST }}/velas
+          REGISTRY: ${{ secrets.REGISTRY_HOST }}/bitorbit
           REPOSITORY: ${{ env.APP_REPO }}
           IMAGE_TAG: ${{github.sha}}
           SOPS_AGE_KEY: ${{ secrets.INFRA_AGE }}
