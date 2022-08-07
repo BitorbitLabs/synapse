@@ -11,7 +11,6 @@ from synapse.handlers.vaccount_auth.constants import (
     VACCOUNT_PROGRAM_ID, 
     VACCOUNT_SEED,
     VACCOUNT_INFO,
-    VELAS_RPC_URI,
     OPERATIONAL_INFO,
 )
 
@@ -48,7 +47,7 @@ def is_valid_vaccount_address(genesis_key_seed: PublicKey, vaccount_id: PublicKe
     return False
 
 
-def find_vaccount_address(genesis_key_seed: PublicKey) -> [Tuple[PublicKey, int], None]:
+def find_vaccount_address(genesis_key_seed: PublicKey) -> Union[Tuple[PublicKey, int], None]:
     """Find valid `Vaccount` address.
 
     Valid `Vaccount` addresses must fall off the ed25519 curve.  This function
@@ -113,7 +112,7 @@ def get_vaccount_evm_address(vaccount_address: PublicKey) -> str:
 class VaccountInfo:
     """Parsed representing Vaccount information"""
     
-    def __init__(self, vaccount_pubkey: Union[PublicKey, bytearray, bytes, int, str, List[int]], client=Client(VELAS_RPC_URI)):
+    def __init__(self, vaccount_pubkey: Union[PublicKey, bytearray, bytes, int, str, List[int]], client: Client):
         self.client = client
         self.pubkey = vaccount_pubkey if isinstance(vaccount_pubkey, PublicKey) else PublicKey(vaccount_pubkey)
         self.version = None

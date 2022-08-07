@@ -23,6 +23,7 @@ from unpaddedbase64 import encode_base64
 from hashlib import sha256
 
 from twisted.internet import defer
+from solana.rpc.api import Client
 from solana.publickey import PublicKey
 from nacl.signing import VerifyKey
 from nacl.exceptions import BadSignatureError
@@ -30,7 +31,7 @@ from redis import Redis
 
 import logging
 
-from synapse.handlers.vaccount_auth.constants import SIGN_TIMESTAMP_TOLERANCE, OPERATIONAL_STATE
+from synapse.handlers.vaccount_auth.constants import SIGN_TIMESTAMP_TOLERANCE, OPERATIONAL_STATE, TESTNET_PRC_URI
 from synapse.handlers.vaccount_auth.utils import VaccountInfo, get_vaccount_evm_address
 from synapse.api.errors import HttpResponseException
 from synapse.handlers.vaccount_auth.utils import is_valid_vaccount_address
@@ -48,6 +49,9 @@ class VaccountAuthProvider:
     def __init__(self, config, account_handler: ModuleApi):
         self.account_handler = account_handler
         self.store: DataStore = account_handler._hs.get_datastore()
+        self.velas_client = Client(
+            endpoint=config.get('NETWORK_PRC_URI', TESTNET_PRC_URI),
+        ) 
         self.redis = Redis(
             host=config.get('REDIS_HOSTNAME'),
             port=config.get('REDIS_PORT'),
@@ -215,7 +219,7 @@ class VaccountAuthProvider:
     async def _is_active_vaccount(self, vaccount_address: PublicKey, signer: PublicKey, signer_type: str) -> bool:
         """
         """
-        vaccount_info = VaccountInfo(vaccount_address)
+        vaccount_info = VaccountInfo(vaccount_address, self.velas_client)
 
         if vaccount_info.is_ephemeral():
             return is_valid_vaccount_address(signer, vaccount_address)

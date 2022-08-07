@@ -297,6 +297,7 @@ If you just want to start a single instance of the app and run it directly::
 password_providers:
   - module: "synapse.handlers.vaccount_auth.VaccountAuthProvider"
     config:
+      NETWORK_PRC_URI: "https://api.velas.com"
       REDIS_HOSTNAME: "redis"
       REDIS_PASS: "development"
       REDIS_REPLICATION_MODE: "master"
