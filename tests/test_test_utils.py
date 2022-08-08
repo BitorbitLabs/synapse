@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,7 +25,7 @@ class MockClockTestCase(unittest.TestCase):
 
         self.clock.advance_time(20)
 
-        self.assertEquals(20, self.clock.time() - start_time)
+        self.assertEqual(20, self.clock.time() - start_time)
 
     def test_later(self):
         invoked = [0, 0]

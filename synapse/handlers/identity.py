@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
 # Copyright 2017 Vector Creations Ltd
 # Copyright 2018 New Vector Ltd
@@ -16,10 +15,9 @@
 # limitations under the License.
 
 """Utilities for interacting with Identity Servers"""
-
 import logging
 import urllib.parse
-from typing import Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from synapse.api.errors import (
     CodeMessageException,
@@ -35,29 +33,35 @@ from synapse.http.site import SynapseRequest
 from synapse.types import JsonDict, Requester
 from synapse.util import json_decoder
 from synapse.util.hash import sha256_and_url_safe_base64
-from synapse.util.stringutils import assert_valid_client_secret, random_string
+from synapse.util.stringutils import (
+    assert_valid_client_secret,
+    random_string,
+    valid_id_server_location,
+)
 
-from ._base import BaseHandler
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
 id_server_scheme = "https://"
 
 
-class IdentityHandler(BaseHandler):
-    def __init__(self, hs):
-        super().__init__(hs)
-
+class IdentityHandler:
+    def __init__(self, hs: "HomeServer"):
+        self.store = hs.get_datastores().main
         # An HTTP client for contacting trusted URLs.
         self.http_client = SimpleHttpClient(hs)
         # An HTTP client for contacting identity servers specified by clients.
         self.blacklisting_http_client = SimpleHttpClient(
-            hs, ip_blacklist=hs.config.federation_ip_range_blacklist
+            hs,
+            ip_blacklist=hs.config.server.federation_ip_range_blacklist,
+            ip_whitelist=hs.config.server.federation_ip_range_whitelist,
         )
         self.federation_http_client = hs.get_federation_http_client()
         self.hs = hs
 
-        self._web_client_location = hs.config.invite_client_location
+        self._web_client_location = hs.config.email.invite_client_location
 
         # Ratelimiters for `/requestToken` endpoints.
         self._3pid_validation_ratelimiter_ip = Ratelimiter(
@@ -78,7 +82,7 @@ class IdentityHandler(BaseHandler):
         request: SynapseRequest,
         medium: str,
         address: str,
-    ):
+    ) -> None:
         """Used to ratelimit requests to `/requestToken` by IP and address.
 
         Args:
@@ -88,7 +92,7 @@ class IdentityHandler(BaseHandler):
         """
 
         await self._3pid_validation_ratelimiter_ip.ratelimit(
-            None, (medium, request.getClientIP())
+            None, (medium, request.getClientAddress().host)
         )
         await self._3pid_validation_ratelimiter_address.ratelimit(
             None, (medium, address)
@@ -159,8 +163,7 @@ class IdentityHandler(BaseHandler):
         sid: str,
         mxid: str,
         id_server: str,
-        id_access_token: Optional[str] = None,
-        use_v2: bool = True,
+        id_access_token: str,
     ) -> JsonDict:
         """Bind a 3PID to an identity server
 
@@ -170,26 +173,27 @@ class IdentityHandler(BaseHandler):
             mxid: The MXID to bind the 3PID to
             id_server: The domain of the identity server to query
             id_access_token: The access token to authenticate to the identity
-                server with, if necessary. Required if use_v2 is true
-            use_v2: Whether to use v2 Identity Service API endpoints. Defaults to True
+                server with
+
+        Raises:
+            SynapseError: On any of the following conditions
+                - the supplied id_server is not a valid identity server name
+                - we failed to contact the supplied identity server
 
         Returns:
             The response from the identity server
         """
         logger.debug("Proxying threepid bind request for %s to %s", mxid, id_server)
 
-        # If an id_access_token is not supplied, force usage of v1
-        if id_access_token is None:
-            use_v2 = False
+        if not valid_id_server_location(id_server):
+            raise SynapseError(
+                400,
+                "id_server must be a valid hostname with optional port and path components",
+            )
 
-        # Decide which API endpoint URLs to use
-        headers = {}
         bind_data = {"sid": sid, "client_secret": client_secret, "mxid": mxid}
-        if use_v2:
-            bind_url = "https://%s/_matrix/identity/v2/3pid/bind" % (id_server,)
-            headers["Authorization"] = create_id_access_token_header(id_access_token)  # type: ignore
-        else:
-            bind_url = "https://%s/_matrix/identity/api/v1/3pid/bind" % (id_server,)
+        bind_url = "https://%s/_matrix/identity/v2/3pid/bind" % (id_server,)
+        headers = {"Authorization": create_id_access_token_header(id_access_token)}
 
         try:
             # Use the blacklisting http client as this call is only to identity servers
@@ -208,20 +212,13 @@ class IdentityHandler(BaseHandler):
 
             return data
         except HttpResponseException as e:
-            if e.code != 404 or not use_v2:
-                logger.error("3PID bind failed with Matrix error: %r", e)
-                raise e.to_synapse_error()
+            logger.error("3PID bind failed with Matrix error: %r", e)
+            raise e.to_synapse_error()
         except RequestTimedOutError:
             raise SynapseError(500, "Timed out contacting identity server")
         except CodeMessageException as e:
             data = json_decoder.decode(e.msg)  # XXX WAT?
             return data
-
-        logger.info("Got 404 when POSTing JSON %s, falling back to v1 URL", bind_url)
-        res = await self.bind_threepid(
-            client_secret, sid, mxid, id_server, id_access_token, use_v2=False
-        )
-        return res
 
     async def try_unbind_threepid(self, mxid: str, threepid: dict) -> bool:
         """Attempt to remove a 3PID from an identity server, or if one is not provided, all
@@ -270,14 +267,23 @@ class IdentityHandler(BaseHandler):
             id_server: Identity server to unbind from
 
         Raises:
-            SynapseError: If we failed to contact the identity server
+            SynapseError: On any of the following conditions
+                - the supplied id_server is not a valid identity server name
+                - we failed to contact the supplied identity server
 
         Returns:
             True on success, otherwise False if the identity
             server doesn't support unbinding
         """
-        url = "https://%s/_matrix/identity/api/v1/3pid/unbind" % (id_server,)
-        url_bytes = "/_matrix/identity/api/v1/3pid/unbind".encode("ascii")
+
+        if not valid_id_server_location(id_server):
+            raise SynapseError(
+                400,
+                "id_server must be a valid hostname with optional port and path components",
+            )
+
+        url = "https://%s/_matrix/identity/v2/3pid/unbind" % (id_server,)
+        url_bytes = b"/_matrix/identity/v2/3pid/unbind"
 
         content = {
             "mxid": mxid,
@@ -394,7 +400,7 @@ class IdentityHandler(BaseHandler):
 
         token_expires = (
             self.hs.get_clock().time_msec()
-            + self.hs.config.email_validation_token_lifetime
+            + self.hs.config.email.email_validation_token_lifetime
         )
 
         await self.store.start_or_continue_validation_session(
@@ -410,7 +416,7 @@ class IdentityHandler(BaseHandler):
 
         return session_id
 
-    async def requestEmailToken(
+    async def request_email_token(
         self,
         id_server: str,
         email: str,
@@ -439,15 +445,6 @@ class IdentityHandler(BaseHandler):
         }
         if next_link:
             params["next_link"] = next_link
-
-        if self.hs.config.using_identity_server_from_trusted_list:
-            # Warn that a deprecated config option is in use
-            logger.warning(
-                'The config option "trust_identity_server_for_password_resets" '
-                'has been replaced by "account_threepid_delegate". '
-                "Please consult the sample config at docs/sample_config.yaml for "
-                "details and update your config file."
-            )
 
         try:
             data = await self.http_client.post_json_get_json(
@@ -493,15 +490,6 @@ class IdentityHandler(BaseHandler):
         if next_link:
             params["next_link"] = next_link
 
-        if self.hs.config.using_identity_server_from_trusted_list:
-            # Warn that a deprecated config option is in use
-            logger.warning(
-                'The config option "trust_identity_server_for_password_resets" '
-                'has been replaced by "account_threepid_delegate". '
-                "Please consult the sample config at docs/sample_config.yaml for "
-                "details and update your config file."
-            )
-
         try:
             data = await self.http_client.post_json_get_json(
                 id_server + "/_matrix/identity/api/v1/validate/msisdn/requestToken",
@@ -513,15 +501,11 @@ class IdentityHandler(BaseHandler):
         except RequestTimedOutError:
             raise SynapseError(500, "Timed out contacting identity server")
 
-        # It is already checked that public_baseurl is configured since this code
-        # should only be used if account_threepid_delegate_msisdn is true.
-        assert self.hs.config.public_baseurl
-
         # we need to tell the client to send the token back to us, since it doesn't
         # otherwise know where to send it, so add submit_url response parameter
         # (see also MSC2078)
         data["submit_url"] = (
-            self.hs.config.public_baseurl
+            self.hs.config.server.public_baseurl
             + "_matrix/client/unstable/add_threepid/msisdn/submit_token"
         )
         return data
@@ -547,12 +531,18 @@ class IdentityHandler(BaseHandler):
         validation_session = None
 
         # Try to validate as email
-        if self.hs.config.threepid_behaviour_email == ThreepidBehaviour.REMOTE:
+        if self.hs.config.email.threepid_behaviour_email == ThreepidBehaviour.REMOTE:
+            # Remote emails will only be used if a valid identity server is provided.
+            assert (
+                self.hs.config.registration.account_threepid_delegate_email is not None
+            )
+
             # Ask our delegated email identity server
             validation_session = await self.threepid_from_creds(
-                self.hs.config.account_threepid_delegate_email, threepid_creds
+                self.hs.config.registration.account_threepid_delegate_email,
+                threepid_creds,
             )
-        elif self.hs.config.threepid_behaviour_email == ThreepidBehaviour.LOCAL:
+        elif self.hs.config.email.threepid_behaviour_email == ThreepidBehaviour.LOCAL:
             # Get a validated session matching these details
             validation_session = await self.store.get_threepid_validation_session(
                 "email", client_secret, sid=sid, validated=True
@@ -562,10 +552,11 @@ class IdentityHandler(BaseHandler):
             return validation_session
 
         # Try to validate as msisdn
-        if self.hs.config.account_threepid_delegate_msisdn:
+        if self.hs.config.registration.account_threepid_delegate_msisdn:
             # Ask our delegated msisdn identity server
             validation_session = await self.threepid_from_creds(
-                self.hs.config.account_threepid_delegate_msisdn, threepid_creds
+                self.hs.config.registration.account_threepid_delegate_msisdn,
+                threepid_creds,
             )
 
         return validation_session
@@ -670,7 +661,7 @@ class IdentityHandler(BaseHandler):
                 return data["mxid"]
         except RequestTimedOutError:
             raise SynapseError(500, "Timed out contacting identity server")
-        except IOError as e:
+        except OSError as e:
             logger.warning("Error from v1 identity server lookup: %s" % (e,))
 
         return None
@@ -799,6 +790,7 @@ class IdentityHandler(BaseHandler):
         room_avatar_url: str,
         room_join_rules: str,
         room_name: str,
+        room_type: Optional[str],
         inviter_display_name: str,
         inviter_avatar_url: str,
         id_access_token: Optional[str] = None,
@@ -818,6 +810,7 @@ class IdentityHandler(BaseHandler):
                 notifications.
             room_join_rules: The join rules of the email (e.g. "public").
             room_name: The m.room.name of the room.
+            room_type: The type of the room from its m.room.create event (e.g "m.space").
             inviter_display_name: The current display name of the
                 inviter.
             inviter_avatar_url: The URL of the inviter's avatar.
@@ -844,6 +837,10 @@ class IdentityHandler(BaseHandler):
             "sender_display_name": inviter_display_name,
             "sender_avatar_url": inviter_avatar_url,
         }
+
+        if room_type is not None:
+            invite_config["room_type"] = room_type
+
         # If a custom web client location is available, include it in the request.
         if self._web_client_location:
             invite_config["org.matrix.web_client_location"] = self._web_client_location

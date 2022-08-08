@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2018-2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +15,20 @@ import contextlib
 import logging
 import os
 import shutil
-from typing import IO, TYPE_CHECKING, Any, Callable, Optional, Sequence
+from types import TracebackType
+from typing import (
+    IO,
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    BinaryIO,
+    Callable,
+    Generator,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+)
 
 import attr
 
@@ -24,6 +36,7 @@ from twisted.internet.defer import Deferred
 from twisted.internet.interfaces import IConsumer
 from twisted.protocols.basic import FileSender
 
+import synapse
 from synapse.api.errors import NotFoundError
 from synapse.logging.context import defer_to_thread, make_deferred_yieldable
 from synapse.util import Clock
@@ -84,12 +97,14 @@ class MediaStorage:
 
         return fname
 
-    async def write_to_file(self, source: IO, output: IO):
+    async def write_to_file(self, source: IO, output: IO) -> None:
         """Asynchronously write the `source` to `output`."""
         await defer_to_thread(self.reactor, _write_file_synchronously, source, output)
 
     @contextlib.contextmanager
-    def store_into_file(self, file_info: FileInfo):
+    def store_into_file(
+        self, file_info: FileInfo
+    ) -> Generator[Tuple[BinaryIO, str, Callable[[], Awaitable[None]]], None, None]:
         """Context manager used to get a file like object to write into, as
         described by file_info.
 
@@ -118,29 +133,30 @@ class MediaStorage:
         fname = os.path.join(self.local_media_directory, path)
 
         dirname = os.path.dirname(fname)
-        if not os.path.exists(dirname):
-            os.makedirs(dirname)
+        os.makedirs(dirname, exist_ok=True)
 
         finished_called = [False]
 
         try:
             with open(fname, "wb") as f:
 
-                async def finish():
+                async def finish() -> None:
                     # Ensure that all writes have been flushed and close the
                     # file.
                     f.flush()
                     f.close()
 
-                    spam = await self.spam_checker.check_media_file_for_spam(
+                    spam_check = await self.spam_checker.check_media_file_for_spam(
                         ReadableFileWrapper(self.clock, fname), file_info
                     )
-                    if spam:
+                    if spam_check != synapse.module_api.NOT_SPAM:
                         logger.info("Blocking media due to spam checker")
                         # Note that we'll delete the stored media, due to the
                         # try/except below. The media also won't be stored in
                         # the DB.
-                        raise SpamMediaException()
+                        # We currently ignore any additional field returned by
+                        # the spam-check API.
+                        raise SpamMediaException(errcode=spam_check[0])
 
                     for provider in self.storage_providers:
                         await provider.store_file(path, file_info)
@@ -177,9 +193,9 @@ class MediaStorage:
                 self.filepaths.remote_media_thumbnail_rel_legacy(
                     server_name=file_info.server_name,
                     file_id=file_info.file_id,
-                    width=file_info.thumbnail_width,
-                    height=file_info.thumbnail_height,
-                    content_type=file_info.thumbnail_type,
+                    width=file_info.thumbnail.width,
+                    height=file_info.thumbnail.height,
+                    content_type=file_info.thumbnail.type,
                 )
             )
 
@@ -192,7 +208,7 @@ class MediaStorage:
 
         for provider in self.storage_providers:
             for path in paths:
-                res = await provider.fetch(path, file_info)  # type: Any
+                res: Any = await provider.fetch(path, file_info)
                 if res:
                     logger.debug("Streaming %s from %s", path, provider)
                     return res
@@ -221,20 +237,19 @@ class MediaStorage:
             legacy_path = self.filepaths.remote_media_thumbnail_rel_legacy(
                 server_name=file_info.server_name,
                 file_id=file_info.file_id,
-                width=file_info.thumbnail_width,
-                height=file_info.thumbnail_height,
-                content_type=file_info.thumbnail_type,
+                width=file_info.thumbnail.width,
+                height=file_info.thumbnail.height,
+                content_type=file_info.thumbnail.type,
             )
             legacy_local_path = os.path.join(self.local_media_directory, legacy_path)
             if os.path.exists(legacy_local_path):
                 return legacy_local_path
 
         dirname = os.path.dirname(local_path)
-        if not os.path.exists(dirname):
-            os.makedirs(dirname)
+        os.makedirs(dirname, exist_ok=True)
 
         for provider in self.storage_providers:
-            res = await provider.fetch(path, file_info)  # type: Any
+            res: Any = await provider.fetch(path, file_info)
             if res:
                 with res:
                     consumer = BackgroundFileConsumer(
@@ -256,10 +271,10 @@ class MediaStorage:
             if file_info.thumbnail:
                 return self.filepaths.url_cache_thumbnail_rel(
                     media_id=file_info.file_id,
-                    width=file_info.thumbnail_width,
-                    height=file_info.thumbnail_height,
-                    content_type=file_info.thumbnail_type,
-                    method=file_info.thumbnail_method,
+                    width=file_info.thumbnail.width,
+                    height=file_info.thumbnail.height,
+                    content_type=file_info.thumbnail.type,
+                    method=file_info.thumbnail.method,
                 )
             return self.filepaths.url_cache_filepath_rel(file_info.file_id)
 
@@ -268,10 +283,10 @@ class MediaStorage:
                 return self.filepaths.remote_media_thumbnail_rel(
                     server_name=file_info.server_name,
                     file_id=file_info.file_id,
-                    width=file_info.thumbnail_width,
-                    height=file_info.thumbnail_height,
-                    content_type=file_info.thumbnail_type,
-                    method=file_info.thumbnail_method,
+                    width=file_info.thumbnail.width,
+                    height=file_info.thumbnail.height,
+                    content_type=file_info.thumbnail.type,
+                    method=file_info.thumbnail.method,
                 )
             return self.filepaths.remote_media_filepath_rel(
                 file_info.server_name, file_info.file_id
@@ -280,10 +295,10 @@ class MediaStorage:
         if file_info.thumbnail:
             return self.filepaths.local_media_thumbnail_rel(
                 media_id=file_info.file_id,
-                width=file_info.thumbnail_width,
-                height=file_info.thumbnail_height,
-                content_type=file_info.thumbnail_type,
-                method=file_info.thumbnail_method,
+                width=file_info.thumbnail.width,
+                height=file_info.thumbnail.height,
+                content_type=file_info.thumbnail.type,
+                method=file_info.thumbnail.method,
             )
         return self.filepaths.local_media_filepath_rel(file_info.file_id)
 
@@ -316,7 +331,12 @@ class FileResponder(Responder):
             FileSender().beginFileTransfer(self.open_file, consumer)
         )
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
         self.open_file.close()
 
 
@@ -326,7 +346,7 @@ class SpamMediaException(NotFoundError):
     """
 
 
-@attr.s(slots=True)
+@attr.s(slots=True, auto_attribs=True)
 class ReadableFileWrapper:
     """Wrapper that allows reading a file in chunks, yielding to the reactor,
     and writing to a callback.
@@ -335,12 +355,12 @@ class ReadableFileWrapper:
     `IConsumer`.
     """
 
-    CHUNK_SIZE = 2 ** 14
+    CHUNK_SIZE = 2**14
 
-    clock = attr.ib(type=Clock)
-    path = attr.ib(type=str)
+    clock: Clock
+    path: str
 
-    async def write_chunks_to(self, callback: Callable[[bytes], None]):
+    async def write_chunks_to(self, callback: Callable[[bytes], None]) -> None:
         """Reads the file in chunks and calls the callback with each chunk."""
 
         with open(self.path, "rb") as file:

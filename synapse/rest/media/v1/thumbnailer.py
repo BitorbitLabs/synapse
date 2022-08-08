@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 # Copyright 2020-2021 The Matrix.org Foundation C.I.C.
 #
@@ -15,7 +14,8 @@
 # limitations under the License.
 import logging
 from io import BytesIO
-from typing import Tuple
+from types import TracebackType
+from typing import Optional, Tuple, Type
 
 from PIL import Image
 
@@ -41,21 +41,43 @@ class Thumbnailer:
 
     FORMATS = {"image/jpeg": "JPEG", "image/png": "PNG"}
 
+    @staticmethod
+    def set_limits(max_image_pixels: int) -> None:
+        Image.MAX_IMAGE_PIXELS = max_image_pixels
+
     def __init__(self, input_path: str):
+        # Have we closed the image?
+        self._closed = False
+
         try:
             self.image = Image.open(input_path)
         except OSError as e:
             # If an error occurs opening the image, a thumbnail won't be able to
             # be generated.
             raise ThumbnailError from e
+        except Image.DecompressionBombError as e:
+            # If an image decompression bomb error occurs opening the image,
+            # then the image exceeds the pixel limit and a thumbnail won't
+            # be able to be generated.
+            raise ThumbnailError from e
 
         self.width, self.height = self.image.size
         self.transpose_method = None
         try:
             # We don't use ImageOps.exif_transpose since it crashes with big EXIF
-            image_exif = self.image._getexif()
+            #
+            # Ignore safety: Pillow seems to acknowledge that this method is
+            # "private, experimental, but generally widely used". Pillow 6
+            # includes a public getexif() method (no underscore) that we might
+            # consider using instead when we can bump that dependency.
+            #
+            # At the time of writing, Debian buster (currently oldstable)
+            # provides version 5.4.1. It's expected to EOL in mid-2022, see
+            # https://wiki.debian.org/DebianReleases#Production_Releases
+            image_exif = self.image._getexif()  # type: ignore
             if image_exif is not None:
                 image_orientation = image_exif.get(EXIF_ORIENTATION_TAG)
+                assert isinstance(image_orientation, int)
                 self.transpose_method = EXIF_TRANSPOSE_MAPPINGS.get(image_orientation)
         except Exception as e:
             # A lot of parsing errors can happen when parsing EXIF
@@ -68,7 +90,11 @@ class Thumbnailer:
             A tuple containing the new image size in pixels as (width, height).
         """
         if self.transpose_method is not None:
-            self.image = self.image.transpose(self.transpose_method)
+            # Safety: `transpose` takes an int rather than e.g. an IntEnum.
+            # self.transpose_method is set above to be a value in
+            # EXIF_TRANSPOSE_MAPPINGS, and that only contains correct values.
+            with self.image:
+                self.image = self.image.transpose(self.transpose_method)  # type: ignore[arg-type]
             self.width, self.height = self.image.size
             self.transpose_method = None
             # We don't need EXIF any more
@@ -80,8 +106,8 @@ class Thumbnailer:
         fits within the given rectangle::
 
             (w_in / h_in) = (w_out / h_out)
-            w_out = min(w_max, h_max * (w_in / h_in))
-            h_out = min(h_max, w_max * (h_in / w_in))
+            w_out = max(min(w_max, h_max * (w_in / h_in)), 1)
+            h_out = max(min(h_max, w_max * (h_in / w_in)), 1)
 
         Args:
             max_width: The largest possible width.
@@ -89,21 +115,23 @@ class Thumbnailer:
         """
 
         if max_width * self.height < max_height * self.width:
-            return max_width, (max_width * self.height) // self.width
+            return max_width, max((max_width * self.height) // self.width, 1)
         else:
-            return (max_height * self.width) // self.height, max_height
+            return max((max_height * self.width) // self.height, 1), max_height
 
-    def _resize(self, width: int, height: int) -> Image:
+    def _resize(self, width: int, height: int) -> Image.Image:
         # 1-bit or 8-bit color palette images need converting to RGB
         # otherwise they will be scaled using nearest neighbour which
         # looks awful.
         #
         # If the image has transparency, use RGBA instead.
         if self.image.mode in ["1", "L", "P"]:
-            mode = "RGB"
             if self.image.info.get("transparency", None) is not None:
-                mode = "RGBA"
-            self.image = self.image.convert(mode)
+                with self.image:
+                    self.image = self.image.convert("RGBA")
+            else:
+                with self.image:
+                    self.image = self.image.convert("RGB")
         return self.image.resize((width, height), Image.ANTIALIAS)
 
     def scale(self, width: int, height: int, output_type: str) -> BytesIO:
@@ -112,8 +140,8 @@ class Thumbnailer:
         Returns:
             BytesIO: the bytes of the encoded image ready to be written to disk
         """
-        scaled = self._resize(width, height)
-        return self._encode_image(scaled, output_type)
+        with self._resize(width, height) as scaled:
+            return self._encode_image(scaled, output_type)
 
     def crop(self, width: int, height: int, output_type: str) -> BytesIO:
         """Rescales and crops the image to the given dimensions preserving
@@ -130,23 +158,65 @@ class Thumbnailer:
             BytesIO: the bytes of the encoded image ready to be written to disk
         """
         if width * self.height > height * self.width:
+            scaled_width = width
             scaled_height = (width * self.height) // self.width
-            scaled_image = self._resize(width, scaled_height)
             crop_top = (scaled_height - height) // 2
             crop_bottom = height + crop_top
-            cropped = scaled_image.crop((0, crop_top, width, crop_bottom))
+            crop = (0, crop_top, width, crop_bottom)
         else:
             scaled_width = (height * self.width) // self.height
-            scaled_image = self._resize(scaled_width, height)
+            scaled_height = height
             crop_left = (scaled_width - width) // 2
             crop_right = width + crop_left
-            cropped = scaled_image.crop((crop_left, 0, crop_right, height))
-        return self._encode_image(cropped, output_type)
+            crop = (crop_left, 0, crop_right, height)
 
-    def _encode_image(self, output_image: Image, output_type: str) -> BytesIO:
+        with self._resize(scaled_width, scaled_height) as scaled_image:
+            with scaled_image.crop(crop) as cropped:
+                return self._encode_image(cropped, output_type)
+
+    def _encode_image(self, output_image: Image.Image, output_type: str) -> BytesIO:
         output_bytes_io = BytesIO()
         fmt = self.FORMATS[output_type]
         if fmt == "JPEG":
             output_image = output_image.convert("RGB")
         output_image.save(output_bytes_io, fmt, quality=80)
         return output_bytes_io
+
+    def close(self) -> None:
+        """Closes the underlying image file.
+
+        Once closed no other functions can be called.
+
+        Can be called multiple times.
+        """
+
+        if self._closed:
+            return
+
+        self._closed = True
+
+        # Since we run this on the finalizer then we need to handle `__init__`
+        # raising an exception before it can define `self.image`.
+        image = getattr(self, "image", None)
+        if image is None:
+            return
+
+        image.close()
+
+    def __enter__(self) -> "Thumbnailer":
+        """Make `Thumbnailer` a context manager that calls `close` on
+        `__exit__`.
+        """
+        return self
+
+    def __exit__(
+        self,
+        type: Optional[Type[BaseException]],
+        value: Optional[BaseException],
+        traceback: Optional[TracebackType],
+    ) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Make sure we actually do close the image, rather than leak data.
+        self.close()

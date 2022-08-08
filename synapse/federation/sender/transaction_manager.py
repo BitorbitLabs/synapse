@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2019 New Vector Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,6 +16,7 @@ from typing import TYPE_CHECKING, List
 
 from prometheus_client import Gauge
 
+from synapse.api.constants import EduTypes
 from synapse.api.errors import HttpResponseException
 from synapse.events import EventBase
 from synapse.federation.persistence import TransactionActions
@@ -28,6 +28,7 @@ from synapse.logging.opentracing import (
     tags,
     whitelisted_homeserver,
 )
+from synapse.types import JsonDict
 from synapse.util import json_decoder
 from synapse.util.metrics import measure_func
 
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
     import synapse.server
 
 logger = logging.getLogger(__name__)
+issue_8631_logger = logging.getLogger("synapse.8631_debug")
 
 last_pdu_ts_metric = Gauge(
     "synapse_federation_last_sent_pdu_time",
@@ -52,12 +54,12 @@ class TransactionManager:
     def __init__(self, hs: "synapse.server.HomeServer"):
         self._server_name = hs.hostname
         self.clock = hs.get_clock()  # nb must be called this for @measure_func
-        self._store = hs.get_datastore()
+        self._store = hs.get_datastores().main
         self._transaction_actions = TransactionActions(self._store)
         self._transport_layer = hs.get_federation_transport_client()
 
         self._federation_metrics_domains = (
-            hs.get_config().federation.federation_metrics_domains
+            hs.config.federation.federation_metrics_domains
         )
 
         # HACK to get unique tx id
@@ -105,13 +107,13 @@ class TransactionManager:
                 len(edus),
             )
 
-            transaction = Transaction.create_new(
+            transaction = Transaction(
                 origin_server_ts=int(self.clock.time_msec()),
                 transaction_id=txn_id,
                 origin=self._server_name,
                 destination=destination,
-                pdus=pdus,
-                edus=edus,
+                pdus=[p.get_pdu_json() for p in pdus],
+                edus=[edu.get_dict() for edu in edus],
             )
 
             self._next_txn_id += 1
@@ -124,6 +126,20 @@ class TransactionManager:
                 len(pdus),
                 len(edus),
             )
+            if issue_8631_logger.isEnabledFor(logging.DEBUG):
+                DEVICE_UPDATE_EDUS = {
+                    EduTypes.DEVICE_LIST_UPDATE,
+                    EduTypes.SIGNING_KEY_UPDATE,
+                }
+                device_list_updates = [
+                    edu.content for edu in edus if edu.edu_type in DEVICE_UPDATE_EDUS
+                ]
+                if device_list_updates:
+                    issue_8631_logger.debug(
+                        "about to send txn [%s] including device list updates: %s",
+                        transaction.transaction_id,
+                        device_list_updates,
+                    )
 
             # Actually send the transaction
 
@@ -132,7 +148,7 @@ class TransactionManager:
             # FIXME (richardv): I also believe it no longer works. We (now?) store
             #  "age_ts" in "unsigned" rather than at the top level. See
             #  https://github.com/matrix-org/synapse/issues/8429.
-            def json_data_cb():
+            def json_data_cb() -> JsonDict:
                 data = transaction.get_dict()
                 now = int(self.clock.time_msec())
                 if "pdus" in data:
@@ -149,7 +165,6 @@ class TransactionManager:
                 )
             except HttpResponseException as e:
                 code = e.code
-                response = e.response
 
                 set_tag(tags.ERROR, True)
 

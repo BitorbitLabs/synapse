@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2017 Vector Creations Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +15,7 @@
 """This module implements the TCP replication protocol used by synapse to
 communicate between the master process and its workers (when they're enabled).
 
-Further details can be found in docs/tcp_replication.rst
+Further details can be found in docs/tcp_replication.md
 
 
 Structure of the module:

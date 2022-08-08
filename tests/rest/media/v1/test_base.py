@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2019 New Vector Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,11 +28,11 @@ class GetFileNameFromHeadersTests(unittest.TestCase):
         b"inline; filename*=utf-8''foo%C2%A3bar": "foo£bar",
     }
 
-    def tests(self):
+    def tests(self) -> None:
         for hdr, expected in self.TEST_CASES.items():
             res = get_filename_from_headers({b"Content-Disposition": [hdr]})
             self.assertEqual(
                 res,
                 expected,
-                "expected output for %s to be %s but was %s" % (hdr, expected, res),
+                f"expected output for {hdr!r} to be {expected} but was {res}",
             )

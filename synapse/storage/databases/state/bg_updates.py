@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,12 +13,21 @@
 # limitations under the License.
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, Union
 
 from synapse.storage._base import SQLBaseStore
-from synapse.storage.database import DatabasePool
+from synapse.storage.database import (
+    DatabasePool,
+    LoggingDatabaseConnection,
+    LoggingTransaction,
+)
 from synapse.storage.engines import PostgresEngine
 from synapse.storage.state import StateFilter
+from synapse.types import MutableStateMap, StateMap
+from synapse.util.caches import intern_string
+
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +40,9 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
     updates.
     """
 
-    def _count_state_group_hops_txn(self, txn, state_group):
+    def _count_state_group_hops_txn(
+        self, txn: LoggingTransaction, state_group: int
+    ) -> int:
         """Given a state group, count how many hops there are in the tree.
 
         This is used to ensure the delta chains don't get too long.
@@ -57,7 +67,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         else:
             # We don't use WITH RECURSIVE on sqlite3 as there are distributions
             # that ship with an sqlite3 version that doesn't support it (e.g. wheezy)
-            next_group = state_group
+            next_group: Optional[int] = state_group
             count = 0
 
             while next_group:
@@ -74,11 +84,14 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             return count
 
     def _get_state_groups_from_groups_txn(
-        self, txn, groups, state_filter: Optional[StateFilter] = None
-    ):
+        self,
+        txn: LoggingTransaction,
+        groups: List[int],
+        state_filter: Optional[StateFilter] = None,
+    ) -> Mapping[int, StateMap[str]]:
         state_filter = state_filter or StateFilter.all()
 
-        results = {group: {} for group in groups}
+        results: Dict[int, MutableStateMap[str]] = {group: {} for group in groups}
 
         where_clause, where_args = state_filter.make_sql_filter_clause()
 
@@ -118,13 +131,13 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             """
 
             for group in groups:
-                args = [group]
+                args: List[Union[int, str]] = [group]
                 args.extend(where_args)
 
                 txn.execute(sql % (where_clause,), args)
                 for row in txn:
                     typ, state_key, event_id = row
-                    key = (typ, state_key)
+                    key = (intern_string(typ), intern_string(state_key))
                     results[group][key] = event_id
         else:
             max_entries_returned = state_filter.max_entries_returned()
@@ -132,7 +145,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             # We don't use WITH RECURSIVE on sqlite3 as there are distributions
             # that ship with an sqlite3 version that doesn't support it (e.g. wheezy)
             for group in groups:
-                next_group = group
+                next_group: Optional[int] = group
 
                 while next_group:
                     # We did this before by getting the list of group ids, and
@@ -174,6 +187,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                         allow_none=True,
                     )
 
+        # The results shouldn't be considered mutable.
         return results
 
 
@@ -182,8 +196,14 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
     STATE_GROUP_DEDUPLICATION_UPDATE_NAME = "state_group_state_deduplication"
     STATE_GROUP_INDEX_UPDATE_NAME = "state_group_state_type_index"
     STATE_GROUPS_ROOM_INDEX_UPDATE_NAME = "state_groups_room_id_idx"
+    STATE_GROUP_EDGES_UNIQUE_INDEX_UPDATE_NAME = "state_group_edges_unique_idx"
 
-    def __init__(self, database: DatabasePool, db_conn, hs):
+    def __init__(
+        self,
+        database: DatabasePool,
+        db_conn: LoggingDatabaseConnection,
+        hs: "HomeServer",
+    ):
         super().__init__(database, db_conn, hs)
         self.db_pool.updates.register_background_update_handler(
             self.STATE_GROUP_DEDUPLICATION_UPDATE_NAME,
@@ -199,7 +219,24 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
             columns=["room_id"],
         )
 
-    async def _background_deduplicate_state(self, progress, batch_size):
+        # `state_group_edges` can cause severe performance issues if duplicate
+        # rows are introduced, which can accidentally be done by well-meaning
+        # server admins when trying to restore a database dump, etc.
+        # See https://github.com/matrix-org/synapse/issues/11779.
+        # Introduce a unique index to guard against that.
+        self.db_pool.updates.register_background_index_update(
+            self.STATE_GROUP_EDGES_UNIQUE_INDEX_UPDATE_NAME,
+            index_name="state_group_edges_unique_idx",
+            table="state_group_edges",
+            columns=["state_group", "prev_state_group"],
+            unique=True,
+            # The old index was on (state_group) and was not unique.
+            replaces_index="state_group_edges_idx",
+        )
+
+    async def _background_deduplicate_state(
+        self, progress: dict, batch_size: int
+    ) -> int:
         """This background update will slowly deduplicate state by reencoding
         them as deltas.
         """
@@ -219,7 +256,7 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
             )
             max_group = rows[0][0]
 
-        def reindex_txn(txn):
+        def reindex_txn(txn: LoggingTransaction) -> Tuple[bool, int]:
             new_last_state_group = last_state_group
             for count in range(batch_size):
                 txn.execute(
@@ -252,7 +289,8 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
                     " WHERE id < ? AND room_id = ?",
                     (state_group, room_id),
                 )
-                (prev_group,) = txn.fetchone()
+                # There will be a result due to the coalesce.
+                (prev_group,) = txn.fetchone()  # type: ignore
                 new_last_state_group = state_group
 
                 if prev_group:
@@ -262,15 +300,15 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
                         # otherwise read performance degrades.
                         continue
 
-                    prev_state = self._get_state_groups_from_groups_txn(
+                    prev_state_by_group = self._get_state_groups_from_groups_txn(
                         txn, [prev_group]
                     )
-                    prev_state = prev_state[prev_group]
+                    prev_state = prev_state_by_group[prev_group]
 
-                    curr_state = self._get_state_groups_from_groups_txn(
+                    curr_state_by_group = self._get_state_groups_from_groups_txn(
                         txn, [state_group]
                     )
-                    curr_state = curr_state[state_group]
+                    curr_state = curr_state_by_group[state_group]
 
                     if not set(prev_state.keys()) - set(curr_state.keys()):
                         # We can only do a delta if the current has a strict super set
@@ -306,14 +344,15 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
                         self.db_pool.simple_insert_many_txn(
                             txn,
                             table="state_groups_state",
+                            keys=(
+                                "state_group",
+                                "room_id",
+                                "type",
+                                "state_key",
+                                "event_id",
+                            ),
                             values=[
-                                {
-                                    "state_group": state_group,
-                                    "room_id": room_id,
-                                    "type": key[0],
-                                    "state_key": key[1],
-                                    "event_id": state_id,
-                                }
+                                (state_group, room_id, key[0], key[1], state_id)
                                 for key, state_id in delta_state.items()
                             ],
                         )
@@ -341,8 +380,8 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
 
         return result * BATCH_SIZE_SCALE_FACTOR
 
-    async def _background_index_state(self, progress, batch_size):
-        def reindex_txn(conn):
+    async def _background_index_state(self, progress: dict, batch_size: int) -> int:
+        def reindex_txn(conn: LoggingDatabaseConnection) -> None:
             conn.rollback()
             if isinstance(self.database_engine, PostgresEngine):
                 # postgres insists on autocommit for the index

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2017 Vector Creations Ltd
 # Copyright 2019 New Vector Ltd
 #
@@ -30,9 +29,8 @@ from synapse.replication.tcp.streams._base import (
     BackfillStream,
     CachesStream,
     DeviceListsStream,
-    GroupServerStream,
+    PresenceFederationStream,
     PresenceStream,
-    PublicRoomsStream,
     PushersStream,
     PushRulesStream,
     ReceiptsStream,
@@ -51,18 +49,17 @@ STREAMS_MAP = {
         EventsStream,
         BackfillStream,
         PresenceStream,
+        PresenceFederationStream,
         TypingStream,
         ReceiptsStream,
         PushRulesStream,
         PushersStream,
         CachesStream,
-        PublicRoomsStream,
         DeviceListsStream,
         ToDeviceStream,
         FederationStream,
         TagAccountDataStream,
         AccountDataStream,
-        GroupServerStream,
         UserSignatureStream,
     )
 }
@@ -72,16 +69,15 @@ __all__ = [
     "Stream",
     "BackfillStream",
     "PresenceStream",
+    "PresenceFederationStream",
     "TypingStream",
     "ReceiptsStream",
     "PushRulesStream",
     "PushersStream",
     "CachesStream",
-    "PublicRoomsStream",
     "DeviceListsStream",
     "ToDeviceStream",
     "TagAccountDataStream",
     "AccountDataStream",
-    "GroupServerStream",
     "UserSignatureStream",
 ]

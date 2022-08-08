@@ -1,6 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright 2017 Vector Creations Ltd
-# Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright 2020, 2022 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -56,6 +55,8 @@ from synapse.replication.tcp.streams import (
     CachesStream,
     EventsStream,
     FederationStream,
+    PresenceFederationStream,
+    PresenceStream,
     ReceiptsStream,
     Stream,
     TagAccountDataStream,
@@ -94,18 +95,25 @@ class ReplicationCommandHandler:
     def __init__(self, hs: "HomeServer"):
         self._replication_data_handler = hs.get_replication_data_handler()
         self._presence_handler = hs.get_presence_handler()
-        self._store = hs.get_datastore()
+        self._store = hs.get_datastores().main
         self._notifier = hs.get_notifier()
         self._clock = hs.get_clock()
         self._instance_id = hs.get_instance_id()
         self._instance_name = hs.get_instance_name()
 
-        self._streams = {
+        # Additional Redis channel suffixes to subscribe to.
+        self._channels_to_subscribe_to: List[str] = []
+
+        self._is_presence_writer = (
+            hs.get_instance_name() in hs.config.worker.writers.presence
+        )
+
+        self._streams: Dict[str, Stream] = {
             stream.NAME: stream(hs) for stream in STREAMS_MAP.values()
-        }  # type: Dict[str, Stream]
+        }
 
         # List of streams that this instance is the source of
-        self._streams_to_replicate = []  # type: List[Stream]
+        self._streams_to_replicate: List[Stream] = []
 
         for stream in self._streams.values():
             if hs.config.redis.redis_enabled and stream.NAME == CachesStream.NAME:
@@ -133,7 +141,7 @@ class ReplicationCommandHandler:
             if isinstance(stream, TypingStream):
                 # Only add TypingStream as a source on the instance in charge of
                 # typing.
-                if hs.config.worker.writers.typing == hs.get_instance_name():
+                if hs.get_instance_name() in hs.config.worker.writers.typing:
                     self._streams_to_replicate.append(stream)
 
                 continue
@@ -154,11 +162,22 @@ class ReplicationCommandHandler:
 
                 continue
 
-            # Only add any other streams if we're on master.
-            if hs.config.worker_app is not None:
+            if isinstance(stream, (PresenceStream, PresenceFederationStream)):
+                # Only add PresenceStream as a source on the instance in charge
+                # of presence.
+                if self._is_presence_writer:
+                    self._streams_to_replicate.append(stream)
+
                 continue
 
-            if stream.NAME == FederationStream.NAME and hs.config.send_federation:
+            # Only add any other streams if we're on master.
+            if hs.config.worker.worker_app is not None:
+                continue
+
+            if (
+                stream.NAME == FederationStream.NAME
+                and hs.config.worker.send_federation
+            ):
                 # We only support federation stream if federation sending
                 # has been disabled on the master.
                 continue
@@ -167,14 +186,14 @@ class ReplicationCommandHandler:
 
         # Map of stream name to batched updates. See RdataCommand for info on
         # how batching works.
-        self._pending_batches = {}  # type: Dict[str, List[Any]]
+        self._pending_batches: Dict[str, List[Any]] = {}
 
         # The factory used to create connections.
-        self._factory = None  # type: Optional[ReconnectingClientFactory]
+        self._factory: Optional[ReconnectingClientFactory] = None
 
         # The currently connected connections. (The list of places we need to send
         # outgoing replication commands to.)
-        self._connections = []  # type: List[IReplicationConnection]
+        self._connections: List[IReplicationConnection] = []
 
         LaterGauge(
             "synapse_replication_tcp_resource_total_connections",
@@ -187,7 +206,7 @@ class ReplicationCommandHandler:
         # them in order in a separate background process.
 
         # the streams which are currently being processed by _unsafe_process_queue
-        self._processing_streams = set()  # type: Set[str]
+        self._processing_streams: Set[str] = set()
 
         # for each stream, a queue of commands that are awaiting processing, and the
         # connection that they arrived on.
@@ -197,7 +216,7 @@ class ReplicationCommandHandler:
 
         # For each connection, the incoming stream names that have received a POSITION
         # from that connection.
-        self._streams_by_connection = {}  # type: Dict[IReplicationConnection, Set[str]]
+        self._streams_by_connection: Dict[IReplicationConnection, Set[str]] = {}
 
         LaterGauge(
             "synapse_replication_tcp_command_queue",
@@ -209,15 +228,48 @@ class ReplicationCommandHandler:
             },
         )
 
-        self._is_master = hs.config.worker_app is None
+        self._is_master = hs.config.worker.worker_app is None
 
         self._federation_sender = None
-        if self._is_master and not hs.config.send_federation:
+        if self._is_master and not hs.config.worker.send_federation:
             self._federation_sender = hs.get_federation_sender()
 
         self._server_notices_sender = None
         if self._is_master:
             self._server_notices_sender = hs.get_server_notices_sender()
+
+        if hs.config.redis.redis_enabled:
+            # If we're using Redis, it's the background worker that should
+            # receive USER_IP commands and store the relevant client IPs.
+            self._should_insert_client_ips = hs.config.worker.run_background_tasks
+        else:
+            # If we're NOT using Redis, this must be handled by the master
+            self._should_insert_client_ips = hs.get_instance_name() == "master"
+
+        if self._is_master or self._should_insert_client_ips:
+            self.subscribe_to_channel("USER_IP")
+
+    def subscribe_to_channel(self, channel_name: str) -> None:
+        """
+        Indicates that we wish to subscribe to a Redis channel by name.
+
+        (The name will later be prefixed with the server name; i.e. subscribing
+        to the 'ABC' channel actually subscribes to 'example.com/ABC' Redis-side.)
+
+        Raises:
+          - If replication has already started, then it's too late to subscribe
+            to new channels.
+        """
+
+        if self._factory is not None:
+            # We don't allow subscribing after the fact to avoid the chance
+            # of missing an important message because we didn't subscribe in time.
+            raise RuntimeError(
+                "Cannot subscribe to more channels after replication started."
+            )
+
+        if channel_name not in self._channels_to_subscribe_to:
+            self._channels_to_subscribe_to.append(channel_name)
 
     def _add_command_to_stream_queue(
         self, conn: IReplicationConnection, cmd: Union[RdataCommand, PositionCommand]
@@ -245,7 +297,7 @@ class ReplicationCommandHandler:
             "process-replication-data", self._unsafe_process_queue, stream_name
         )
 
-    async def _unsafe_process_queue(self, stream_name: str):
+    async def _unsafe_process_queue(self, stream_name: str) -> None:
         """Processes the command queue for the given stream, until it is empty
 
         Does not check if there is already a thread processing the queue, hence "unsafe"
@@ -278,10 +330,8 @@ class ReplicationCommandHandler:
             # This shouldn't be possible
             raise Exception("Unrecognised command %s in stream queue", cmd.NAME)
 
-    def start_replication(self, hs):
-        """Helper method to start a replication connection to the remote server
-        using TCP.
-        """
+    def start_replication(self, hs: "HomeServer") -> None:
+        """Helper method to start replication."""
         if hs.config.redis.redis_enabled:
             from synapse.replication.tcp.redis import (
                 RedisDirectTcpReplicationClientFactory,
@@ -299,19 +349,29 @@ class ReplicationCommandHandler:
 
             # Now create the factory/connection for the subscription stream.
             self._factory = RedisDirectTcpReplicationClientFactory(
-                hs, outbound_redis_connection
+                hs,
+                outbound_redis_connection,
+                channel_names=self._channels_to_subscribe_to,
             )
             hs.get_reactor().connectTCP(
-                hs.config.redis.redis_host.encode(),
+                hs.config.redis.redis_host,
                 hs.config.redis.redis_port,
                 self._factory,
+                timeout=30,
+                bindAddress=None,
             )
         else:
             client_name = hs.get_instance_name()
             self._factory = DirectTcpReplicationClientFactory(hs, client_name, self)
-            host = hs.config.worker_replication_host
-            port = hs.config.worker_replication_port
-            hs.get_reactor().connectTCP(host.encode(), port, self._factory)
+            host = hs.config.worker.worker_replication_host
+            port = hs.config.worker.worker_replication_port
+            hs.get_reactor().connectTCP(
+                host,
+                port,
+                self._factory,
+                timeout=30,
+                bindAddress=None,
+            )
 
     def get_streams(self) -> Dict[str, Stream]:
         """Get a map from stream name to all streams."""
@@ -321,10 +381,10 @@ class ReplicationCommandHandler:
         """Get a list of streams that this instances replicates."""
         return self._streams_to_replicate
 
-    def on_REPLICATE(self, conn: IReplicationConnection, cmd: ReplicateCommand):
+    def on_REPLICATE(self, conn: IReplicationConnection, cmd: ReplicateCommand) -> None:
         self.send_positions_to_connection(conn)
 
-    def send_positions_to_connection(self, conn: IReplicationConnection):
+    def send_positions_to_connection(self, conn: IReplicationConnection) -> None:
         """Send current position of all streams this process is source of to
         the connection.
         """
@@ -351,7 +411,7 @@ class ReplicationCommandHandler:
     ) -> Optional[Awaitable[None]]:
         user_sync_counter.inc()
 
-        if self._is_master:
+        if self._is_presence_writer:
             return self._presence_handler.update_external_syncs_row(
                 cmd.instance_id, cmd.user_id, cmd.is_syncing, cmd.last_sync_ms
             )
@@ -361,14 +421,14 @@ class ReplicationCommandHandler:
     def on_CLEAR_USER_SYNC(
         self, conn: IReplicationConnection, cmd: ClearUserSyncsCommand
     ) -> Optional[Awaitable[None]]:
-        if self._is_master:
+        if self._is_presence_writer:
             return self._presence_handler.update_external_syncs_clear(cmd.instance_id)
         else:
             return None
 
     def on_FEDERATION_ACK(
         self, conn: IReplicationConnection, cmd: FederationAckCommand
-    ):
+    ) -> None:
         federation_ack_counter.inc()
 
         if self._federation_sender:
@@ -379,25 +439,39 @@ class ReplicationCommandHandler:
     ) -> Optional[Awaitable[None]]:
         user_ip_cache_counter.inc()
 
-        if self._is_master:
+        if self._is_master or self._should_insert_client_ips:
+            # We make a point of only returning an awaitable if there's actually
+            # something to do; on_USER_IP is not an async function, but
+            # _handle_user_ip is.
+            # If on_USER_IP returns an awaitable, it gets scheduled as a
+            # background process (see `BaseReplicationStreamProtocol.handle_command`).
             return self._handle_user_ip(cmd)
         else:
+            # Returning None when this process definitely has nothing to do
+            # reduces the overhead of handling the USER_IP command, which is
+            # currently broadcast to all workers regardless of utility.
             return None
 
-    async def _handle_user_ip(self, cmd: UserIpCommand):
-        await self._store.insert_client_ip(
-            cmd.user_id,
-            cmd.access_token,
-            cmd.ip,
-            cmd.user_agent,
-            cmd.device_id,
-            cmd.last_seen,
-        )
+    async def _handle_user_ip(self, cmd: UserIpCommand) -> None:
+        """
+        Handles a User IP, branching depending on whether we are the main process
+        and/or the background worker.
+        """
+        if self._is_master:
+            assert self._server_notices_sender is not None
+            await self._server_notices_sender.on_user_ip(cmd.user_id)
 
-        assert self._server_notices_sender is not None
-        await self._server_notices_sender.on_user_ip(cmd.user_id)
+        if self._should_insert_client_ips:
+            await self._store.insert_client_ip(
+                cmd.user_id,
+                cmd.access_token,
+                cmd.ip,
+                cmd.user_agent,
+                cmd.device_id,
+                cmd.last_seen,
+            )
 
-    def on_RDATA(self, conn: IReplicationConnection, cmd: RdataCommand):
+    def on_RDATA(self, conn: IReplicationConnection, cmd: RdataCommand) -> None:
         if cmd.instance_name == self._instance_name:
             # Ignore RDATA that are just our own echoes
             return
@@ -473,7 +547,7 @@ class ReplicationCommandHandler:
 
     async def on_rdata(
         self, stream_name: str, instance_name: str, token: int, rows: list
-    ):
+    ) -> None:
         """Called to handle a batch of replication data with a given stream token.
 
         Args:
@@ -488,12 +562,12 @@ class ReplicationCommandHandler:
             stream_name, instance_name, token, rows
         )
 
-    def on_POSITION(self, conn: IReplicationConnection, cmd: PositionCommand):
+    def on_POSITION(self, conn: IReplicationConnection, cmd: PositionCommand) -> None:
         if cmd.instance_name == self._instance_name:
             # Ignore POSITION that are just our own echoes
             return
 
-        logger.info("Handling '%s %s'", cmd.NAME, cmd.to_line())
+        logger.debug("Handling '%s %s'", cmd.NAME, cmd.to_line())
 
         self._add_command_to_stream_queue(conn, cmd)
 
@@ -523,6 +597,11 @@ class ReplicationCommandHandler:
         # between then and now.
         missing_updates = cmd.prev_token != current_token
         while missing_updates:
+            # Note: There may very well not be any new updates, but we check to
+            # make sure. This can particularly happen for the event stream where
+            # event persisters continuously send `POSITION`. See `resource.py`
+            # for why this can happen.
+
             logger.info(
                 "Fetching replication rows for '%s' between %i and %i",
                 stream_name,
@@ -546,7 +625,7 @@ class ReplicationCommandHandler:
                     [stream.parse_row(row) for row in rows],
                 )
 
-        logger.info("Caught up with stream '%s' to %i", stream_name, cmd.new_token)
+            logger.info("Caught up with stream '%s' to %i", stream_name, cmd.new_token)
 
         # We've now caught up to position sent to us, notify handler.
         await self._replication_data_handler.on_position(
@@ -557,8 +636,8 @@ class ReplicationCommandHandler:
 
     def on_REMOTE_SERVER_UP(
         self, conn: IReplicationConnection, cmd: RemoteServerUpCommand
-    ):
-        """"Called when get a new REMOTE_SERVER_UP command."""
+    ) -> None:
+        """Called when get a new REMOTE_SERVER_UP command."""
         self._replication_data_handler.on_remote_server_up(cmd.data)
 
         self._notifier.notify_remote_server_up(cmd.data)
@@ -580,7 +659,7 @@ class ReplicationCommandHandler:
         # between two instances, but that is not currently supported).
         self.send_command(cmd, ignore_conn=conn)
 
-    def new_connection(self, connection: IReplicationConnection):
+    def new_connection(self, connection: IReplicationConnection) -> None:
         """Called when we have a new connection."""
         self._connections.append(connection)
 
@@ -607,7 +686,7 @@ class ReplicationCommandHandler:
                 UserSyncCommand(self._instance_id, user_id, True, now)
             )
 
-    def lost_connection(self, connection: IReplicationConnection):
+    def lost_connection(self, connection: IReplicationConnection) -> None:
         """Called when a connection is closed/lost."""
         # we no longer need _streams_by_connection for this connection.
         streams = self._streams_by_connection.pop(connection, None)
@@ -629,7 +708,7 @@ class ReplicationCommandHandler:
 
     def send_command(
         self, cmd: Command, ignore_conn: Optional[IReplicationConnection] = None
-    ):
+    ) -> None:
         """Send a command to all connected connections.
 
         Args:
@@ -656,7 +735,7 @@ class ReplicationCommandHandler:
         else:
             logger.warning("Dropping command as not connected: %r", cmd.NAME)
 
-    def send_federation_ack(self, token: int):
+    def send_federation_ack(self, token: int) -> None:
         """Ack data for the federation stream. This allows the master to drop
         data stored purely in memory.
         """
@@ -664,7 +743,7 @@ class ReplicationCommandHandler:
 
     def send_user_sync(
         self, instance_id: str, user_id: str, is_syncing: bool, last_sync_ms: int
-    ):
+    ) -> None:
         """Poke the master that a user has started/stopped syncing."""
         self.send_command(
             UserSyncCommand(instance_id, user_id, is_syncing, last_sync_ms)
@@ -676,18 +755,18 @@ class ReplicationCommandHandler:
         access_token: str,
         ip: str,
         user_agent: str,
-        device_id: str,
+        device_id: Optional[str],
         last_seen: int,
-    ):
+    ) -> None:
         """Tell the master that the user made a request."""
         cmd = UserIpCommand(user_id, access_token, ip, user_agent, device_id, last_seen)
         self.send_command(cmd)
 
-    def send_remote_server_up(self, server: str):
+    def send_remote_server_up(self, server: str) -> None:
         self.send_command(RemoteServerUpCommand(server))
 
-    def stream_update(self, stream_name: str, token: str, data: Any):
-        """Called when a new update is available to stream to clients.
+    def stream_update(self, stream_name: str, token: Optional[int], data: Any) -> None:
+        """Called when a new update is available to stream to Redis subscribers.
 
         We need to check if the client is interested in the stream or not
         """

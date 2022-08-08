@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2019 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -96,4 +95,4 @@ def build_rc_config(settings: Optional[dict] = None):
     config_dict.update(settings or {})
     config = HomeServerConfig()
     config.parse_config_dict(config_dict, "", "")
-    return config.rc_federation
+    return config.ratelimiting.rc_federation

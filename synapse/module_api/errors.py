@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2020 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,4 +14,22 @@
 
 """Exception types which are exposed as part of the stable module API"""
 
-from synapse.api.errors import RedirectException, SynapseError  # noqa: F401
+from synapse.api.errors import (
+    Codes,
+    InvalidClientCredentialsError,
+    RedirectException,
+    SynapseError,
+)
+from synapse.config._base import ConfigError
+from synapse.handlers.push_rules import InvalidRuleException
+from synapse.storage.push_rule import RuleNotFoundException
+
+__all__ = [
+    "Codes",
+    "InvalidClientCredentialsError",
+    "RedirectException",
+    "SynapseError",
+    "ConfigError",
+    "InvalidRuleException",
+    "RuleNotFoundException",
+]

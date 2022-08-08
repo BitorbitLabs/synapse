@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,17 +19,19 @@ from synapse.push.rulekinds import PRIORITY_CLASS_INVERSE_MAP, PRIORITY_CLASS_MA
 from synapse.types import UserID
 
 
-def format_push_rules_for_user(user: UserID, ruleslist) -> Dict[str, Dict[str, list]]:
+def format_push_rules_for_user(
+    user: UserID, ruleslist: List
+) -> Dict[str, Dict[str, list]]:
     """Converts a list of rawrules and a enabled map into nested dictionaries
     to match the Matrix client-server format for push rules"""
 
     # We're going to be mutating this a lot, so do a deep copy
     ruleslist = copy.deepcopy(ruleslist)
 
-    rules = {
+    rules: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
         "global": {},
         "device": {},
-    }  # type: Dict[str, Dict[str, List[Dict[str, Any]]]]
+    }
 
     rules["global"] = _add_empty_priority_class_arrays(rules["global"])
 
@@ -39,13 +40,17 @@ def format_push_rules_for_user(user: UserID, ruleslist) -> Dict[str, Dict[str, l
 
         # Remove internal stuff.
         for c in r["conditions"]:
-            c.pop("_id", None)
+            c.pop("_cache_key", None)
 
             pattern_type = c.pop("pattern_type", None)
             if pattern_type == "user_id":
                 c["pattern"] = user.to_string()
             elif pattern_type == "user_localpart":
                 c["pattern"] = user.localpart
+
+            sender_type = c.pop("sender_type", None)
+            if sender_type == "user_id":
+                c["sender"] = user.to_string()
 
         rulearray = rules["global"][template_name]
 

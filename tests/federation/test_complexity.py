@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2019 Matrix.org Foundation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from http import HTTPStatus
 from unittest.mock import Mock
 
 from synapse.api.errors import Codes, SynapseError
 from synapse.rest import admin
-from synapse.rest.client.v1 import login, room
+from synapse.rest.client import login, room
 from synapse.types import UserID
 
 from tests import unittest
@@ -48,22 +48,22 @@ class RoomComplexityTests(unittest.FederatingHomeserverTestCase):
         )
 
         # Get the room complexity
-        channel = self.make_request(
+        channel = self.make_signed_federation_request(
             "GET", "/_matrix/federation/unstable/rooms/%s/complexity" % (room_1,)
         )
-        self.assertEquals(200, channel.code)
+        self.assertEqual(HTTPStatus.OK, channel.code)
         complexity = channel.json_body["v1"]
         self.assertTrue(complexity > 0, complexity)
 
         # Artificially raise the complexity
-        store = self.hs.get_datastore()
+        store = self.hs.get_datastores().main
         store.get_current_state_event_counts = lambda x: make_awaitable(500 * 1.23)
 
         # Get the room complexity again -- make sure it's our artificial value
-        channel = self.make_request(
+        channel = self.make_signed_federation_request(
             "GET", "/_matrix/federation/unstable/rooms/%s/complexity" % (room_1,)
         )
-        self.assertEquals(200, channel.code)
+        self.assertEqual(HTTPStatus.OK, channel.code)
         complexity = channel.json_body["v1"]
         self.assertEqual(complexity, 1.23)
 
@@ -150,7 +150,7 @@ class RoomComplexityTests(unittest.FederatingHomeserverTestCase):
         )
 
         # Artificially raise the complexity
-        self.hs.get_datastore().get_current_state_event_counts = (
+        self.hs.get_datastores().main.get_current_state_event_counts = (
             lambda x: make_awaitable(600)
         )
 

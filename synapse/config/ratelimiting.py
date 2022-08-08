@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
+
+import attr
+
+from synapse.types import JsonDict
 
 from ._base import Config
 
@@ -29,24 +33,19 @@ class RateLimitConfig:
         self.burst_count = int(config.get("burst_count", defaults["burst_count"]))
 
 
+@attr.s(auto_attribs=True)
 class FederationRateLimitConfig:
-    _items_and_default = {
-        "window_size": 1000,
-        "sleep_limit": 10,
-        "sleep_delay": 500,
-        "reject_limit": 50,
-        "concurrent": 3,
-    }
-
-    def __init__(self, **kwargs):
-        for i in self._items_and_default.keys():
-            setattr(self, i, kwargs.get(i) or self._items_and_default[i])
+    window_size: int = 1000
+    sleep_limit: int = 10
+    sleep_delay: int = 500
+    reject_limit: int = 50
+    concurrent: int = 3
 
 
 class RatelimitConfig(Config):
     section = "ratelimiting"
 
-    def read_config(self, config, **kwargs):
+    def read_config(self, config: JsonDict, **kwargs: Any) -> None:
 
         # Load the new-style messages config if it exists. Otherwise fall back
         # to the old method.
@@ -69,15 +68,24 @@ class RatelimitConfig(Config):
         else:
             self.rc_federation = FederationRateLimitConfig(
                 **{
-                    "window_size": config.get("federation_rc_window_size"),
-                    "sleep_limit": config.get("federation_rc_sleep_limit"),
-                    "sleep_delay": config.get("federation_rc_sleep_delay"),
-                    "reject_limit": config.get("federation_rc_reject_limit"),
-                    "concurrent": config.get("federation_rc_concurrent"),
+                    k: v
+                    for k, v in {
+                        "window_size": config.get("federation_rc_window_size"),
+                        "sleep_limit": config.get("federation_rc_sleep_limit"),
+                        "sleep_delay": config.get("federation_rc_sleep_delay"),
+                        "reject_limit": config.get("federation_rc_reject_limit"),
+                        "concurrent": config.get("federation_rc_concurrent"),
+                    }.items()
+                    if v is not None
                 }
             )
 
         self.rc_registration = RateLimitConfig(config.get("rc_registration", {}))
+
+        self.rc_registration_token_validity = RateLimitConfig(
+            config.get("rc_registration_token_validity", {}),
+            defaults={"per_second": 0.1, "burst_count": 5},
+        )
 
         rc_login_config = config.get("rc_login", {})
         self.rc_login_address = RateLimitConfig(rc_login_config.get("address", {}))
@@ -104,6 +112,13 @@ class RatelimitConfig(Config):
             defaults={"per_second": 0.01, "burst_count": 10},
         )
 
+        # Track the rate of joins to a given room. If there are too many, temporarily
+        # prevent local joins and remote joins via this server.
+        self.rc_joins_per_room = RateLimitConfig(
+            config.get("rc_joins_per_room", {}),
+            defaults={"per_second": 1, "burst_count": 10},
+        )
+
         # Ratelimit cross-user key requests:
         # * For local requests this is keyed by the sending device.
         # * For requests received over federation this is keyed by the origin.
@@ -128,111 +143,15 @@ class RatelimitConfig(Config):
             defaults={"per_second": 0.003, "burst_count": 5},
         )
 
-    def generate_config_section(self, **kwargs):
-        return """\
-        ## Ratelimiting ##
+        self.rc_invites_per_issuer = RateLimitConfig(
+            config.get("rc_invites", {}).get("per_issuer", {}),
+            defaults={"per_second": 0.3, "burst_count": 10},
+        )
 
-        # Ratelimiting settings for client actions (registration, login, messaging).
-        #
-        # Each ratelimiting configuration is made of two parameters:
-        #   - per_second: number of requests a client can send per second.
-        #   - burst_count: number of requests a client can send before being throttled.
-        #
-        # Synapse currently uses the following configurations:
-        #   - one for messages that ratelimits sending based on the account the client
-        #     is using
-        #   - one for registration that ratelimits registration requests based on the
-        #     client's IP address.
-        #   - one for login that ratelimits login requests based on the client's IP
-        #     address.
-        #   - one for login that ratelimits login requests based on the account the
-        #     client is attempting to log into.
-        #   - one for login that ratelimits login requests based on the account the
-        #     client is attempting to log into, based on the amount of failed login
-        #     attempts for this account.
-        #   - one for ratelimiting redactions by room admins. If this is not explicitly
-        #     set then it uses the same ratelimiting as per rc_message. This is useful
-        #     to allow room admins to deal with abuse quickly.
-        #   - two for ratelimiting number of rooms a user can join, "local" for when
-        #     users are joining rooms the server is already in (this is cheap) vs
-        #     "remote" for when users are trying to join rooms not on the server (which
-        #     can be more expensive)
-        #   - one for ratelimiting how often a user or IP can attempt to validate a 3PID.
-        #   - two for ratelimiting how often invites can be sent in a room or to a
-        #     specific user.
-        #
-        # The defaults are as shown below.
-        #
-        #rc_message:
-        #  per_second: 0.2
-        #  burst_count: 10
-        #
-        #rc_registration:
-        #  per_second: 0.17
-        #  burst_count: 3
-        #
-        #rc_login:
-        #  address:
-        #    per_second: 0.17
-        #    burst_count: 3
-        #  account:
-        #    per_second: 0.17
-        #    burst_count: 3
-        #  failed_attempts:
-        #    per_second: 0.17
-        #    burst_count: 3
-        #
-        #rc_admin_redaction:
-        #  per_second: 1
-        #  burst_count: 50
-        #
-        #rc_joins:
-        #  local:
-        #    per_second: 0.1
-        #    burst_count: 10
-        #  remote:
-        #    per_second: 0.01
-        #    burst_count: 10
-        #
-        #rc_3pid_validation:
-        #  per_second: 0.003
-        #  burst_count: 5
-        #
-        #rc_invites:
-        #  per_room:
-        #    per_second: 0.3
-        #    burst_count: 10
-        #  per_user:
-        #    per_second: 0.003
-        #    burst_count: 5
-
-        # Ratelimiting settings for incoming federation
-        #
-        # The rc_federation configuration is made up of the following settings:
-        #   - window_size: window size in milliseconds
-        #   - sleep_limit: number of federation requests from a single server in
-        #     a window before the server will delay processing the request.
-        #   - sleep_delay: duration in milliseconds to delay processing events
-        #     from remote servers by if they go over the sleep limit.
-        #   - reject_limit: maximum number of concurrent federation requests
-        #     allowed from a single server
-        #   - concurrent: number of federation requests to concurrently process
-        #     from a single server
-        #
-        # The defaults are as shown below.
-        #
-        #rc_federation:
-        #  window_size: 1000
-        #  sleep_limit: 10
-        #  sleep_delay: 500
-        #  reject_limit: 50
-        #  concurrent: 3
-
-        # Target outgoing federation transaction frequency for sending read-receipts,
-        # per-room.
-        #
-        # If we end up trying to send out more read-receipts, they will get buffered up
-        # into fewer transactions.
-        #
-        #federation_rr_transactions_per_room_per_second: 50
-        """
+        self.rc_third_party_invite = RateLimitConfig(
+            config.get("rc_third_party_invite", {}),
+            defaults={
+                "per_second": self.rc_message.per_second,
+                "burst_count": self.rc_message.burst_count,
+            },
+        )

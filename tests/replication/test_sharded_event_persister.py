@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2020 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,10 +14,9 @@
 import logging
 from unittest.mock import patch
 
-from synapse.api.room_versions import RoomVersion
 from synapse.rest import admin
-from synapse.rest.client.v1 import login, room
-from synapse.rest.client.v2_alpha import sync
+from synapse.rest.client import login, room, sync
+from synapse.storage.util.id_generators import MultiWriterIdGenerator
 
 from tests.replication._base import BaseMultiWorkerStreamTestCase
 from tests.server import make_request
@@ -31,7 +29,7 @@ class EventPersisterShardTestCase(BaseMultiWorkerStreamTestCase):
     """Checks event persisting sharding works"""
 
     # Event persister sharding requires postgres (due to needing
-    # `MutliWriterIdGenerator`).
+    # `MultiWriterIdGenerator`).
     if not USE_POSTGRES_FOR_TESTS:
         skip = "Requires Postgres"
 
@@ -48,7 +46,7 @@ class EventPersisterShardTestCase(BaseMultiWorkerStreamTestCase):
         self.other_access_token = self.login("otheruser", "pass")
 
         self.room_creator = self.hs.get_room_creation_handler()
-        self.store = hs.get_datastore()
+        self.store = hs.get_datastores().main
 
     def default_config(self):
         conf = super().default_config()
@@ -65,21 +63,10 @@ class EventPersisterShardTestCase(BaseMultiWorkerStreamTestCase):
 
         # We control the room ID generation by patching out the
         # `_generate_room_id` method
-        async def generate_room(
-            creator_id: str, is_public: bool, room_version: RoomVersion
-        ):
-            await self.store.store_room(
-                room_id=room_id,
-                room_creator_user_id=creator_id,
-                is_public=is_public,
-                room_version=room_version,
-            )
-            return room_id
-
         with patch(
             "synapse.handlers.room.RoomCreationHandler._generate_room_id"
         ) as mock:
-            mock.side_effect = generate_room
+            mock.side_effect = lambda: room_id
             self.helper.create_room_as(user_id, tok=tok)
 
     def test_basic(self):
@@ -100,7 +87,7 @@ class EventPersisterShardTestCase(BaseMultiWorkerStreamTestCase):
         persisted_on_1 = False
         persisted_on_2 = False
 
-        store = self.hs.get_datastore()
+        store = self.hs.get_datastores().main
 
         user_id = self.register_user("user", "pass")
         access_token = self.login("user", "pass")
@@ -167,7 +154,7 @@ class EventPersisterShardTestCase(BaseMultiWorkerStreamTestCase):
         user_id = self.register_user("user", "pass")
         access_token = self.login("user", "pass")
 
-        store = self.hs.get_datastore()
+        store = self.hs.get_datastores().main
 
         # Create two room on the different workers.
         self._create_room(room_id1, user_id, access_token)
@@ -195,7 +182,10 @@ class EventPersisterShardTestCase(BaseMultiWorkerStreamTestCase):
         #
         # Worker2's event stream position will not advance until we call
         # __aexit__ again.
-        actx = worker_hs2.get_datastore()._stream_id_gen.get_next()
+        worker_store2 = worker_hs2.get_datastores().main
+        assert isinstance(worker_store2._stream_id_gen, MultiWriterIdGenerator)
+
+        actx = worker_store2._stream_id_gen.get_next()
         self.get_success(actx.__aenter__())
 
         response = self.helper.send(room_id1, body="Hi!", tok=self.other_access_token)
@@ -212,7 +202,7 @@ class EventPersisterShardTestCase(BaseMultiWorkerStreamTestCase):
             self.reactor,
             sync_hs_site,
             "GET",
-            "/sync?since={}".format(next_batch),
+            f"/sync?since={next_batch}",
             access_token=access_token,
         )
 
@@ -242,7 +232,7 @@ class EventPersisterShardTestCase(BaseMultiWorkerStreamTestCase):
             self.reactor,
             sync_hs_site,
             "GET",
-            "/sync?since={}".format(vector_clock_token),
+            f"/sync?since={vector_clock_token}",
             access_token=access_token,
         )
 
@@ -267,7 +257,7 @@ class EventPersisterShardTestCase(BaseMultiWorkerStreamTestCase):
             self.reactor,
             sync_hs_site,
             "GET",
-            "/sync?since={}".format(next_batch),
+            f"/sync?since={next_batch}",
             access_token=access_token,
         )
 

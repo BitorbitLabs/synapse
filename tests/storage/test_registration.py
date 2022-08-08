@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,7 +20,7 @@ from tests.unittest import HomeserverTestCase
 
 class RegistrationStoreTestCase(HomeserverTestCase):
     def prepare(self, reactor, clock, hs):
-        self.store = hs.get_datastore()
+        self.store = hs.get_datastores().main
 
         self.user_id = "@my-user:test"
         self.tokens = ["AbCdEfGhIjKlMnOpQrStUvWxYz", "BcDeFgHiJkLmNoPqRsTuVwXyZa"]
@@ -31,7 +30,7 @@ class RegistrationStoreTestCase(HomeserverTestCase):
     def test_register(self):
         self.get_success(self.store.register_user(self.user_id, self.pwhash))
 
-        self.assertEquals(
+        self.assertEqual(
             {
                 # TODO(paul): Surely this field should be 'user_id', not 'name'
                 "name": self.user_id,
@@ -132,7 +131,7 @@ class RegistrationStoreTestCase(HomeserverTestCase):
             ),
             ThreepidValidationError,
         )
-        self.assertEquals(e.value.msg, "Unknown session_id", e)
+        self.assertEqual(e.value.msg, "Unknown session_id", e)
 
         # Set the config setting to true.
         self.store._ignore_unknown_session_error = True
@@ -147,4 +146,4 @@ class RegistrationStoreTestCase(HomeserverTestCase):
             ),
             ThreepidValidationError,
         )
-        self.assertEquals(e.value.msg, "Validation token not found or has expired", e)
+        self.assertEqual(e.value.msg, "Validation token not found or has expired", e)

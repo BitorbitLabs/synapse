@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,6 +27,7 @@ from synapse.push.pusher import PusherFactory
 from synapse.replication.http.push import ReplicationRemovePusherRestServlet
 from synapse.types import JsonDict, RoomStreamToken
 from synapse.util.async_helpers import concurrently_execute
+from synapse.util.threepids import canonicalise_email
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -60,13 +59,11 @@ class PusherPool:
     def __init__(self, hs: "HomeServer"):
         self.hs = hs
         self.pusher_factory = PusherFactory(hs)
-        self.store = self.hs.get_datastore()
+        self.store = self.hs.get_datastores().main
         self.clock = self.hs.get_clock()
 
-        self._account_validity = hs.config.account_validity
-
         # We shard the handling of push notifications by user ID.
-        self._pusher_shard_config = hs.config.push.pusher_shard_config
+        self._pusher_shard_config = hs.config.worker.pusher_shard_config
         self._instance_name = hs.get_instance_name()
         self._should_start_pushers = (
             self._instance_name in self._pusher_shard_config.instances
@@ -86,7 +83,9 @@ class PusherPool:
         self._last_room_stream_id_seen = self.store.get_room_max_stream_ordering()
 
         # map from user id to app_id:pushkey to pusher
-        self.pushers = {}  # type: Dict[str, Dict[str, Pusher]]
+        self.pushers: Dict[str, Dict[str, Pusher]] = {}
+
+        self._account_validity_handler = hs.get_account_validity_handler()
 
     def start(self) -> None:
         """Starts the pushers off in a background process."""
@@ -115,7 +114,9 @@ class PusherPool:
         """
 
         if kind == "email":
-            email_owner = await self.store.get_user_id_by_threepid("email", pushkey)
+            email_owner = await self.store.get_user_id_by_threepid(
+                "email", canonicalise_email(pushkey)
+            )
             if email_owner != user_id:
                 raise SynapseError(400, "Email not found", Codes.THREEPID_NOT_FOUND)
 
@@ -237,12 +238,9 @@ class PusherPool:
 
             for u in users_affected:
                 # Don't push if the user account has expired
-                if self._account_validity.enabled:
-                    expired = await self.store.is_account_expired(
-                        u, self.clock.time_msec()
-                    )
-                    if expired:
-                        continue
+                expired = await self._account_validity_handler.is_user_expired(u)
+                if expired:
+                    continue
 
                 if u in self.pushers:
                     for p in self.pushers[u].values():
@@ -267,12 +265,9 @@ class PusherPool:
 
             for u in users_affected:
                 # Don't push if the user account has expired
-                if self._account_validity.enabled:
-                    expired = await self.store.is_account_expired(
-                        u, self.clock.time_msec()
-                    )
-                    if expired:
-                        continue
+                expired = await self._account_validity_handler.is_user_expired(u)
+                if expired:
+                    continue
 
                 if u in self.pushers:
                     for p in self.pushers[u].values():
@@ -333,7 +328,7 @@ class PusherPool:
             return None
 
         try:
-            p = self.pusher_factory.create_pusher(pusher_config)
+            pusher = self.pusher_factory.create_pusher(pusher_config)
         except PusherConfigException as e:
             logger.warning(
                 "Pusher incorrectly configured id=%i, user=%s, appid=%s, pushkey=%s: %s",
@@ -351,23 +346,28 @@ class PusherPool:
             )
             return None
 
-        if not p:
+        if not pusher:
             return None
 
-        appid_pushkey = "%s:%s" % (pusher_config.app_id, pusher_config.pushkey)
+        appid_pushkey = "%s:%s" % (pusher.app_id, pusher.pushkey)
 
-        byuser = self.pushers.setdefault(pusher_config.user_name, {})
+        byuser = self.pushers.setdefault(pusher.user_id, {})
         if appid_pushkey in byuser:
-            byuser[appid_pushkey].on_stop()
-        byuser[appid_pushkey] = p
+            previous_pusher = byuser[appid_pushkey]
+            previous_pusher.on_stop()
 
-        synapse_pushers.labels(type(p).__name__, p.app_id).inc()
+            synapse_pushers.labels(
+                type(previous_pusher).__name__, previous_pusher.app_id
+            ).dec()
+        byuser[appid_pushkey] = pusher
+
+        synapse_pushers.labels(type(pusher).__name__, pusher.app_id).inc()
 
         # Check if there *may* be push to process. We do this as this check is a
         # lot cheaper to do than actually fetching the exact rows we need to
         # push.
-        user_id = pusher_config.user_name
-        last_stream_ordering = pusher_config.last_stream_ordering
+        user_id = pusher.user_id
+        last_stream_ordering = pusher.last_stream_ordering
         if last_stream_ordering:
             have_notifs = await self.store.get_if_maybe_push_in_range_for_user(
                 user_id, last_stream_ordering
@@ -377,9 +377,9 @@ class PusherPool:
             # risk missing push.
             have_notifs = True
 
-        p.on_started(have_notifs)
+        pusher.on_started(have_notifs)
 
-        return p
+        return pusher
 
     async def remove_pusher(self, app_id: str, pushkey: str, user_id: str) -> None:
         appid_pushkey = "%s:%s" % (app_id, pushkey)

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 # Copyright 2018 New Vector Ltd
 # Copyright 2019-2021 The Matrix.org Foundation C.I.C.
@@ -16,18 +15,18 @@
 # limitations under the License.
 
 import logging
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple, cast
 
-from synapse.api.constants import PresenceState
 from synapse.config.homeserver import HomeServerConfig
-from synapse.storage.database import DatabasePool
-from synapse.storage.databases.main.stats import UserSortOrder
-from synapse.storage.engines import PostgresEngine
-from synapse.storage.util.id_generators import (
-    IdGenerator,
-    MultiWriterIdGenerator,
-    StreamIdGenerator,
+from synapse.storage.database import (
+    DatabasePool,
+    LoggingDatabaseConnection,
+    LoggingTransaction,
 )
+from synapse.storage.databases.main.stats import UserSortOrder
+from synapse.storage.engines import BaseDatabaseEngine
+from synapse.storage.types import Cursor
+from synapse.storage.util.id_generators import StreamIdGenerator
 from synapse.types import JsonDict, get_domain_from_id
 from synapse.util.caches.stream_change_cache import StreamChangeCache
 
@@ -35,7 +34,7 @@ from .account_data import AccountDataStore
 from .appservice import ApplicationServiceStore, ApplicationServiceTransactionStore
 from .cache import CacheInvalidationWorkerStore
 from .censor_events import CensorEventsStore
-from .client_ips import ClientIpStore
+from .client_ips import ClientIpWorkerStore
 from .deviceinbox import DeviceInboxStore
 from .devices import DeviceStore
 from .directory import DirectoryStore
@@ -46,13 +45,13 @@ from .event_push_actions import EventPushActionsStore
 from .events_bg_updates import EventsBackgroundUpdatesStore
 from .events_forward_extremities import EventForwardExtremitiesStore
 from .filtering import FilteringStore
-from .group_server import GroupServerStore
 from .keys import KeyStore
+from .lock import LockStore
 from .media_repository import MediaRepositoryStore
 from .metrics import ServerMetricsStore
-from .monthly_active_users import MonthlyActiveUsersStore
+from .monthly_active_users import MonthlyActiveUsersWorkerStore
 from .openid import OpenIdStore
-from .presence import PresenceStore, UserPresenceState
+from .presence import PresenceStore
 from .profile import ProfileStore
 from .purge_events import PurgeEventsStore
 from .push_rule import PushRuleStore
@@ -62,17 +61,22 @@ from .registration import RegistrationStore
 from .rejections import RejectionsStore
 from .relations import RelationsStore
 from .room import RoomStore
+from .room_batch import RoomBatchStore
 from .roommember import RoomMemberStore
 from .search import SearchStore
+from .session import SessionStore
 from .signatures import SignatureStore
 from .state import StateStore
 from .stats import StatsStore
-from .stream import StreamStore
+from .stream import StreamWorkerStore
 from .tags import TagsStore
-from .transactions import TransactionStore
+from .transactions import TransactionWorkerStore
 from .ui_auth import UIAuthStore
 from .user_directory import UserDirectoryStore
 from .user_erasure_store import UserErasureStore
+
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +85,11 @@ class DataStore(
     EventsBackgroundUpdatesStore,
     RoomMemberStore,
     RoomStore,
+    RoomBatchStore,
     RegistrationStore,
-    StreamStore,
     ProfileStore,
     PresenceStore,
-    TransactionStore,
+    TransactionWorkerStore,
     DirectoryStore,
     KeyStore,
     StateStore,
@@ -99,40 +103,41 @@ class DataStore(
     PusherStore,
     PushRuleStore,
     ApplicationServiceTransactionStore,
+    EventPushActionsStore,
+    ServerMetricsStore,
     ReceiptsStore,
     EndToEndKeyStore,
     EndToEndRoomKeyStore,
     SearchStore,
     TagsStore,
     AccountDataStore,
-    EventPushActionsStore,
+    StreamWorkerStore,
     OpenIdStore,
-    ClientIpStore,
+    ClientIpWorkerStore,
     DeviceStore,
     DeviceInboxStore,
     UserDirectoryStore,
-    GroupServerStore,
     UserErasureStore,
-    MonthlyActiveUsersStore,
+    MonthlyActiveUsersWorkerStore,
     StatsStore,
     RelationsStore,
     CensorEventsStore,
     UIAuthStore,
-    CacheInvalidationWorkerStore,
-    ServerMetricsStore,
     EventForwardExtremitiesStore,
+    CacheInvalidationWorkerStore,
+    LockStore,
+    SessionStore,
 ):
-    def __init__(self, database: DatabasePool, db_conn, hs):
+    def __init__(
+        self,
+        database: DatabasePool,
+        db_conn: LoggingDatabaseConnection,
+        hs: "HomeServer",
+    ):
         self.hs = hs
         self._clock = hs.get_clock()
         self.database_engine = database.engine
 
-        self._presence_id_gen = StreamIdGenerator(
-            db_conn, "presence_stream", "stream_id"
-        )
-        self._public_room_id_gen = StreamIdGenerator(
-            db_conn, "public_room_list_stream", "stream_id"
-        )
         self._device_list_id_gen = StreamIdGenerator(
             db_conn,
             "device_lists_stream",
@@ -140,69 +145,11 @@ class DataStore(
             extra_tables=[
                 ("user_signature_stream", "stream_id"),
                 ("device_lists_outbound_pokes", "stream_id"),
+                ("device_lists_changes_in_room", "stream_id"),
             ],
         )
-        self._cross_signing_id_gen = StreamIdGenerator(
-            db_conn, "e2e_cross_signing_keys", "stream_id"
-        )
-
-        self._event_reports_id_gen = IdGenerator(db_conn, "event_reports", "id")
-        self._push_rule_id_gen = IdGenerator(db_conn, "push_rules", "id")
-        self._push_rules_enable_id_gen = IdGenerator(db_conn, "push_rules_enable", "id")
-        self._group_updates_id_gen = StreamIdGenerator(
-            db_conn, "local_group_updates", "stream_id"
-        )
-
-        if isinstance(self.database_engine, PostgresEngine):
-            # We set the `writers` to an empty list here as we don't care about
-            # missing updates over restarts, as we'll not have anything in our
-            # caches to invalidate. (This reduces the amount of writes to the DB
-            # that happen).
-            self._cache_id_gen = MultiWriterIdGenerator(
-                db_conn,
-                database,
-                stream_name="caches",
-                instance_name=hs.get_instance_name(),
-                tables=[
-                    (
-                        "cache_invalidation_stream_by_instance",
-                        "instance_name",
-                        "stream_id",
-                    )
-                ],
-                sequence_name="cache_invalidation_stream_seq",
-                writers=[],
-            )
-        else:
-            self._cache_id_gen = None
 
         super().__init__(database, db_conn, hs)
-
-        self._presence_on_startup = self._get_active_presence(db_conn)
-
-        presence_cache_prefill, min_presence_val = self.db_pool.get_cache_dict(
-            db_conn,
-            "presence_stream",
-            entity_column="user_id",
-            stream_column="stream_id",
-            max_value=self._presence_id_gen.get_current_token(),
-        )
-        self.presence_stream_cache = StreamChangeCache(
-            "PresenceStreamChangeCache",
-            min_presence_val,
-            prefilled_cache=presence_cache_prefill,
-        )
-
-        device_list_max = self._device_list_id_gen.get_current_token()
-        self._device_list_stream_cache = StreamChangeCache(
-            "DeviceListStreamChangeCache", device_list_max
-        )
-        self._user_signature_stream_cache = StreamChangeCache(
-            "UserSignatureStreamChangeCache", device_list_max
-        )
-        self._device_list_federation_stream_cache = StreamChangeCache(
-            "DeviceListFederationStreamChangeCache", device_list_max
-        )
 
         events_max = self._stream_id_gen.get_current_token()
         curr_state_delta_prefill, min_curr_state_delta_id = self.db_pool.get_cache_dict(
@@ -219,51 +166,12 @@ class DataStore(
             prefilled_cache=curr_state_delta_prefill,
         )
 
-        _group_updates_prefill, min_group_updates_id = self.db_pool.get_cache_dict(
-            db_conn,
-            "local_group_updates",
-            entity_column="user_id",
-            stream_column="stream_id",
-            max_value=self._group_updates_id_gen.get_current_token(),
-            limit=1000,
-        )
-        self._group_updates_stream_cache = StreamChangeCache(
-            "_group_updates_stream_cache",
-            min_group_updates_id,
-            prefilled_cache=_group_updates_prefill,
-        )
-
         self._stream_order_on_start = self.get_room_max_stream_ordering()
         self._min_stream_order_on_start = self.get_room_min_stream_ordering()
 
     def get_device_stream_token(self) -> int:
+        # TODO: shouldn't this be moved to `DeviceWorkerStore`?
         return self._device_list_id_gen.get_current_token()
-
-    def take_presence_startup_info(self):
-        active_on_startup = self._presence_on_startup
-        self._presence_on_startup = None
-        return active_on_startup
-
-    def _get_active_presence(self, db_conn):
-        """Fetch non-offline presence from the database so that we can register
-        the appropriate time outs.
-        """
-
-        sql = (
-            "SELECT user_id, state, last_active_ts, last_federation_update_ts,"
-            " last_user_sync_ts, status_msg, currently_active FROM presence_stream"
-            " WHERE state != ?"
-        )
-
-        txn = db_conn.cursor()
-        txn.execute(sql, (PresenceState.OFFLINE,))
-        rows = self.db_pool.cursor_to_dict(txn)
-        txn.close()
-
-        for row in rows:
-            row["currently_active"] = bool(row["currently_active"])
-
-        return [UserPresenceState(**row) for row in rows]
 
     async def get_users(self) -> List[JsonDict]:
         """Function to retrieve a list of users in users table.
@@ -293,7 +201,7 @@ class DataStore(
         name: Optional[str] = None,
         guests: bool = True,
         deactivated: bool = False,
-        order_by: UserSortOrder = UserSortOrder.USER_ID.value,
+        order_by: str = UserSortOrder.USER_ID.value,
         direction: str = "f",
     ) -> Tuple[List[JsonDict], int]:
         """Function to retrieve a paginated list of users from
@@ -313,9 +221,11 @@ class DataStore(
             A tuple of a list of mappings from user to information and a count of total users.
         """
 
-        def get_users_paginate_txn(txn):
+        def get_users_paginate_txn(
+            txn: LoggingTransaction,
+        ) -> Tuple[List[JsonDict], int]:
             filters = []
-            args = [self.hs.config.server_name]
+            args = [self.hs.config.server.server_name]
 
             # Set ordering
             order_by_column = UserSortOrder(order_by).value
@@ -341,27 +251,22 @@ class DataStore(
 
             where_clause = "WHERE " + " AND ".join(filters) if len(filters) > 0 else ""
 
-            sql_base = """
+            sql_base = f"""
                 FROM users as u
                 LEFT JOIN profiles AS p ON u.name = '@' || p.user_id || ':' || ?
-                {}
-                """.format(
-                where_clause
-            )
+                {where_clause}
+                """
             sql = "SELECT COUNT(*) as total_users " + sql_base
             txn.execute(sql, args)
-            count = txn.fetchone()[0]
+            count = cast(Tuple[int], txn.fetchone())[0]
 
-            sql = """
-                SELECT name, user_type, is_guest, admin, deactivated, shadow_banned, displayname, avatar_url
+            sql = f"""
+                SELECT name, user_type, is_guest, admin, deactivated, shadow_banned,
+                displayname, avatar_url, creation_ts * 1000 as creation_ts
                 {sql_base}
                 ORDER BY {order_by_column} {order}, u.name ASC
                 LIMIT ? OFFSET ?
-            """.format(
-                sql_base=sql_base,
-                order_by_column=order_by_column,
-                order=order,
-            )
+            """
             args += [limit, start]
             txn.execute(sql, args)
             users = self.db_pool.cursor_to_dict(txn)
@@ -390,7 +295,9 @@ class DataStore(
         )
 
 
-def check_database_before_upgrade(cur, database_engine, config: HomeServerConfig):
+def check_database_before_upgrade(
+    cur: Cursor, database_engine: BaseDatabaseEngine, config: HomeServerConfig
+) -> None:
     """Called before upgrading an existing database to check that it is broadly sane
     compared with the configuration.
     """
@@ -405,13 +312,13 @@ def check_database_before_upgrade(cur, database_engine, config: HomeServerConfig
         return
 
     user_domain = get_domain_from_id(rows[0][0])
-    if user_domain == config.server_name:
+    if user_domain == config.server.server_name:
         return
 
     raise Exception(
         "Found users in database not native to %s!\n"
         "You cannot change a synapse server_name after it's been configured"
-        % (config.server_name,)
+        % (config.server.server_name,)
     )
 
 

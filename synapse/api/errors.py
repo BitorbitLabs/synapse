@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 # Copyright 2018 New Vector Ltd
 #
@@ -18,8 +17,9 @@
 
 import logging
 import typing
+from enum import Enum
 from http import HTTPStatus
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from twisted.web import http
 
@@ -31,7 +31,11 @@ if typing.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class Codes:
+class Codes(str, Enum):
+    """
+    All known error codes, as an enum of strings.
+    """
+
     UNRECOGNIZED = "M_UNRECOGNIZED"
     UNAUTHORIZED = "M_UNAUTHORIZED"
     FORBIDDEN = "M_FORBIDDEN"
@@ -75,7 +79,19 @@ class Codes:
     WEAK_PASSWORD = "M_WEAK_PASSWORD"
     INVALID_SIGNATURE = "M_INVALID_SIGNATURE"
     USER_DEACTIVATED = "M_USER_DEACTIVATED"
+
+    # The account has been suspended on the server.
+    # By opposition to `USER_DEACTIVATED`, this is a reversible measure
+    # that can possibly be appealed and reverted.
+    # Part of MSC3823.
+    USER_ACCOUNT_SUSPENDED = "ORG.MATRIX.MSC3823.USER_ACCOUNT_SUSPENDED"
+
     BAD_ALIAS = "M_BAD_ALIAS"
+    # For restricted join rules.
+    UNABLE_AUTHORISE_JOIN = "M_UNABLE_TO_AUTHORISE_JOIN"
+    UNABLE_TO_GRANT_JOIN = "M_UNABLE_TO_GRANT_JOIN"
+
+    UNREDACTED_CONTENT_DELETED = "FI.MAU.MSC2815_UNREDACTED_CONTENT_DELETED"
 
 
 class CodeMessageException(RuntimeError):
@@ -119,7 +135,7 @@ class RedirectException(CodeMessageException):
         super().__init__(code=http_code, msg=msg)
         self.location = location
 
-        self.cookies = []  # type: List[bytes]
+        self.cookies: List[bytes] = []
 
 
 class SynapseError(CodeMessageException):
@@ -130,7 +146,13 @@ class SynapseError(CodeMessageException):
         errcode: Matrix error code e.g 'M_FORBIDDEN'
     """
 
-    def __init__(self, code: int, msg: str, errcode: str = Codes.UNKNOWN):
+    def __init__(
+        self,
+        code: int,
+        msg: str,
+        errcode: str = Codes.UNKNOWN,
+        additional_fields: Optional[Dict] = None,
+    ):
         """Constructs a synapse error.
 
         Args:
@@ -140,9 +162,21 @@ class SynapseError(CodeMessageException):
         """
         super().__init__(code, msg)
         self.errcode = errcode
+        if additional_fields is None:
+            self._additional_fields: Dict = {}
+        else:
+            self._additional_fields = dict(additional_fields)
 
-    def error_dict(self):
-        return cs_error(self.msg, self.errcode)
+    def error_dict(self) -> "JsonDict":
+        return cs_error(self.msg, self.errcode, **self._additional_fields)
+
+
+class InvalidAPICallError(SynapseError):
+    """You called an existing API endpoint, but fed that endpoint
+    invalid or incomplete data."""
+
+    def __init__(self, msg: str):
+        super().__init__(HTTPStatus.BAD_REQUEST, msg, Codes.BAD_JSON)
 
 
 class ProxiedRequestError(SynapseError):
@@ -159,14 +193,7 @@ class ProxiedRequestError(SynapseError):
         errcode: str = Codes.UNKNOWN,
         additional_fields: Optional[Dict] = None,
     ):
-        super().__init__(code, msg, errcode)
-        if additional_fields is None:
-            self._additional_fields = {}  # type: Dict
-        else:
-            self._additional_fields = dict(additional_fields)
-
-    def error_dict(self):
-        return cs_error(self.msg, self.errcode, **self._additional_fields)
+        super().__init__(code, msg, errcode, additional_fields)
 
 
 class ConsentNotGivenError(SynapseError):
@@ -186,7 +213,7 @@ class ConsentNotGivenError(SynapseError):
         )
         self._consent_uri = consent_uri
 
-    def error_dict(self):
+    def error_dict(self) -> "JsonDict":
         return cs_error(self.msg, self.errcode, consent_uri=self._consent_uri)
 
 
@@ -252,14 +279,10 @@ class InteractiveAuthIncompleteError(Exception):
 class UnrecognizedRequestError(SynapseError):
     """An error indicating we don't understand the request you're trying to make"""
 
-    def __init__(self, *args, **kwargs):
-        if "errcode" not in kwargs:
-            kwargs["errcode"] = Codes.UNRECOGNIZED
-        if len(args) == 0:
-            message = "Unrecognized request"
-        else:
-            message = args[0]
-        super().__init__(400, message, **kwargs)
+    def __init__(
+        self, msg: str = "Unrecognized request", errcode: str = Codes.UNRECOGNIZED
+    ):
+        super().__init__(400, msg, errcode)
 
 
 class NotFoundError(SynapseError):
@@ -274,10 +297,14 @@ class AuthError(SynapseError):
     other poorly-defined times.
     """
 
-    def __init__(self, *args, **kwargs):
-        if "errcode" not in kwargs:
-            kwargs["errcode"] = Codes.FORBIDDEN
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        code: int,
+        msg: str,
+        errcode: str = Codes.FORBIDDEN,
+        additional_fields: Optional[dict] = None,
+    ):
+        super().__init__(code, msg, errcode, additional_fields)
 
 
 class InvalidClientCredentialsError(SynapseError):
@@ -311,7 +338,7 @@ class InvalidClientTokenError(InvalidClientCredentialsError):
         super().__init__(msg=msg, errcode="M_UNKNOWN_TOKEN")
         self._soft_logout = soft_logout
 
-    def error_dict(self):
+    def error_dict(self) -> "JsonDict":
         d = super().error_dict()
         d["soft_logout"] = self._soft_logout
         return d
@@ -335,7 +362,7 @@ class ResourceLimitError(SynapseError):
         self.limit_type = limit_type
         super().__init__(code, msg, errcode=errcode)
 
-    def error_dict(self):
+    def error_dict(self) -> "JsonDict":
         return cs_error(
             self.msg,
             self.errcode,
@@ -347,31 +374,16 @@ class ResourceLimitError(SynapseError):
 class EventSizeError(SynapseError):
     """An error raised when an event is too big."""
 
-    def __init__(self, *args, **kwargs):
-        if "errcode" not in kwargs:
-            kwargs["errcode"] = Codes.TOO_LARGE
-        super().__init__(413, *args, **kwargs)
-
-
-class EventStreamError(SynapseError):
-    """An error raised when there a problem with the event stream."""
-
-    def __init__(self, *args, **kwargs):
-        if "errcode" not in kwargs:
-            kwargs["errcode"] = Codes.BAD_PAGINATION
-        super().__init__(*args, **kwargs)
+    def __init__(self, msg: str):
+        super().__init__(413, msg, Codes.TOO_LARGE)
 
 
 class LoginError(SynapseError):
     """An error raised when there was a problem logging in."""
 
-    pass
-
 
 class StoreError(SynapseError):
     """An error raised when there was a problem storing some data."""
-
-    pass
 
 
 class InvalidCaptchaError(SynapseError):
@@ -385,7 +397,7 @@ class InvalidCaptchaError(SynapseError):
         super().__init__(code, msg, errcode)
         self.error_url = error_url
 
-    def error_dict(self):
+    def error_dict(self) -> "JsonDict":
         return cs_error(self.msg, self.errcode, error_url=self.error_url)
 
 
@@ -402,7 +414,7 @@ class LimitExceededError(SynapseError):
         super().__init__(code, msg, errcode)
         self.retry_after_ms = retry_after_ms
 
-    def error_dict(self):
+    def error_dict(self) -> "JsonDict":
         return cs_error(self.msg, self.errcode, retry_after_ms=self.retry_after_ms)
 
 
@@ -416,6 +428,9 @@ class RoomKeysVersionError(SynapseError):
         """
         super().__init__(403, "Wrong room_keys version", Codes.WRONG_ROOM_KEYS_VERSION)
         self.current_version = current_version
+
+    def error_dict(self) -> "JsonDict":
+        return cs_error(self.msg, self.errcode, current_version=self.current_version)
 
 
 class UnsupportedRoomVersionError(SynapseError):
@@ -433,10 +448,8 @@ class UnsupportedRoomVersionError(SynapseError):
 class ThreepidValidationError(SynapseError):
     """An error raised when there was a problem authorising an event."""
 
-    def __init__(self, *args, **kwargs):
-        if "errcode" not in kwargs:
-            kwargs["errcode"] = Codes.FORBIDDEN
-        super().__init__(*args, **kwargs)
+    def __init__(self, msg: str, errcode: str = Codes.FORBIDDEN):
+        super().__init__(400, msg, errcode)
 
 
 class IncompatibleRoomVersionError(SynapseError):
@@ -450,13 +463,13 @@ class IncompatibleRoomVersionError(SynapseError):
         super().__init__(
             code=400,
             msg="Your homeserver does not support the features required to "
-            "join this room",
+            "interact with this room",
             errcode=Codes.INCOMPATIBLE_ROOM_VERSION,
         )
 
         self._room_version = room_version
 
-    def error_dict(self):
+    def error_dict(self) -> "JsonDict":
         return cs_error(self.msg, self.errcode, room_version=self._room_version)
 
 
@@ -484,7 +497,7 @@ class RequestSendFailed(RuntimeError):
     errors (like programming errors).
     """
 
-    def __init__(self, inner_exception, can_retry):
+    def __init__(self, inner_exception: BaseException, can_retry: bool):
         super().__init__(
             "Failed to send request: %s: %s"
             % (type(inner_exception).__name__, inner_exception)
@@ -493,7 +506,23 @@ class RequestSendFailed(RuntimeError):
         self.can_retry = can_retry
 
 
-def cs_error(msg: str, code: str = Codes.UNKNOWN, **kwargs):
+class UnredactedContentDeletedError(SynapseError):
+    def __init__(self, content_keep_ms: Optional[int] = None):
+        super().__init__(
+            404,
+            "The content for that event has already been erased from the database",
+            errcode=Codes.UNREDACTED_CONTENT_DELETED,
+        )
+        self.content_keep_ms = content_keep_ms
+
+    def error_dict(self) -> "JsonDict":
+        extra = {}
+        if self.content_keep_ms is not None:
+            extra = {"fi.mau.msc2815.content_keep_ms": self.content_keep_ms}
+        return cs_error(self.msg, self.errcode, **extra)
+
+
+def cs_error(msg: str, code: str = Codes.UNKNOWN, **kwargs: Any) -> "JsonDict":
     """Utility method for constructing an error response for client-server
     interactions.
 
@@ -541,7 +570,7 @@ class FederationError(RuntimeError):
         msg = "%s %s: %s" % (level, code, reason)
         super().__init__(msg)
 
-    def get_dict(self):
+    def get_dict(self) -> "JsonDict":
         return {
             "level": self.level,
             "code": self.code,
@@ -570,7 +599,7 @@ class HttpResponseException(CodeMessageException):
         super().__init__(code, msg)
         self.response = response
 
-    def to_synapse_error(self):
+    def to_synapse_error(self) -> SynapseError:
         """Make a SynapseError based on an HTTPResponseException
 
         This is useful when a proxied request has failed, and we need to
@@ -608,4 +637,11 @@ class ShadowBanError(Exception):
     Raised when a shadow-banned user attempts to perform an action.
 
     This should be caught and a proper "fake" success response sent to the user.
+    """
+
+
+class ModuleFailedException(Exception):
+    """
+    Raised when a module API callback fails, for example because it raised an
+    exception.
     """

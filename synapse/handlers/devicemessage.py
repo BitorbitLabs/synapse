@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +15,7 @@
 import logging
 from typing import TYPE_CHECKING, Any, Dict
 
-from synapse.api.constants import EduTypes
+from synapse.api.constants import EduTypes, ToDeviceEventTypes
 from synapse.api.errors import SynapseError
 from synapse.api.ratelimiting import Ratelimiter
 from synapse.logging.context import run_in_background
@@ -27,7 +26,7 @@ from synapse.logging.opentracing import (
     set_tag,
 )
 from synapse.replication.http.devices import ReplicationUserDevicesResyncRestServlet
-from synapse.types import JsonDict, Requester, UserID, get_domain_from_id
+from synapse.types import JsonDict, Requester, StreamKeyType, UserID, get_domain_from_id
 from synapse.util import json_encoder
 from synapse.util.stringutils import random_string
 
@@ -44,7 +43,7 @@ class DeviceMessageHandler:
         Args:
             hs: server
         """
-        self.store = hs.get_datastore()
+        self.store = hs.get_datastores().main
         self.notifier = hs.get_notifier()
         self.is_mine = hs.is_mine
 
@@ -60,11 +59,11 @@ class DeviceMessageHandler:
         # to the appropriate worker.
         if hs.get_instance_name() in hs.config.worker.writers.to_device:
             hs.get_federation_registry().register_edu_handler(
-                "m.direct_to_device", self.on_direct_to_device_edu
+                EduTypes.DIRECT_TO_DEVICE, self.on_direct_to_device_edu
             )
         else:
             hs.get_federation_registry().register_instances_for_edu(
-                "m.direct_to_device",
+                EduTypes.DIRECT_TO_DEVICE,
                 hs.config.worker.writers.to_device,
             )
 
@@ -80,14 +79,23 @@ class DeviceMessageHandler:
                 ReplicationUserDevicesResyncRestServlet.make_client(hs)
             )
 
+        # a rate limiter for room key requests.  The keys are
+        # (sending_user_id, sending_device_id).
         self._ratelimiter = Ratelimiter(
             store=self.store,
             clock=hs.get_clock(),
-            rate_hz=hs.config.rc_key_requests.per_second,
-            burst_count=hs.config.rc_key_requests.burst_count,
+            rate_hz=hs.config.ratelimiting.rc_key_requests.per_second,
+            burst_count=hs.config.ratelimiting.rc_key_requests.burst_count,
         )
 
     async def on_direct_to_device_edu(self, origin: str, content: JsonDict) -> None:
+        """
+        Handle receiving to-device messages from remote homeservers.
+
+        Args:
+            origin: The remote homeserver.
+            content: The JSON dictionary containing the to-device messages.
+        """
         local_messages = {}
         sender_user_id = content["sender"]
         if origin != get_domain_from_id(sender_user_id):
@@ -101,11 +109,24 @@ class DeviceMessageHandler:
         for user_id, by_device in content["messages"].items():
             # we use UserID.from_string to catch invalid user ids
             if not self.is_mine(UserID.from_string(user_id)):
-                logger.warning("Request for keys for non-local user %s", user_id)
+                logger.warning("To-device message to non-local user %s", user_id)
                 raise SynapseError(400, "Not a user here")
 
             if not by_device:
                 continue
+
+            # Ratelimit key requests by the sending user.
+            if message_type == ToDeviceEventTypes.RoomKeyRequest:
+                allowed, _ = await self._ratelimiter.can_do_action(
+                    None, (sender_user_id, None)
+                )
+                if not allowed:
+                    logger.info(
+                        "Dropping room_key_request from %s to %s due to rate limit",
+                        sender_user_id,
+                        user_id,
+                    )
+                    continue
 
             messages_by_device = {
                 device_id: {
@@ -121,12 +142,16 @@ class DeviceMessageHandler:
                 message_type, sender_user_id, by_device
             )
 
-        stream_id = await self.store.add_messages_from_remote_to_device_inbox(
+        # Add messages to the database.
+        # Retrieve the stream id of the last-processed to-device message.
+        last_stream_id = await self.store.add_messages_from_remote_to_device_inbox(
             origin, message_id, local_messages
         )
 
+        # Notify listeners that there are new to-device messages to process,
+        # handing them the latest stream id.
         self.notifier.on_new_event(
-            "to_device_key", stream_id, users=local_messages.keys()
+            StreamKeyType.TO_DEVICE, last_stream_id, users=local_messages.keys()
         )
 
     async def _check_for_unknown_devices(
@@ -181,6 +206,14 @@ class DeviceMessageHandler:
         message_type: str,
         messages: Dict[str, Dict[str, JsonDict]],
     ) -> None:
+        """
+        Handle a request from a user to send to-device message(s).
+
+        Args:
+            requester: The user that is sending the to-device messages.
+            message_type: The type of to-device messages that are being sent.
+            messages: A dictionary containing recipients mapped to messages intended for them.
+        """
         sender_user_id = requester.user.to_string()
 
         message_id = random_string(16)
@@ -189,17 +222,23 @@ class DeviceMessageHandler:
         log_kv({"number_of_to_device_messages": len(messages)})
         set_tag("sender", sender_user_id)
         local_messages = {}
-        remote_messages = {}  # type: Dict[str, Dict[str, Dict[str, JsonDict]]]
+        remote_messages: Dict[str, Dict[str, Dict[str, JsonDict]]] = {}
         for user_id, by_device in messages.items():
             # Ratelimit local cross-user key requests by the sending device.
             if (
-                message_type == EduTypes.RoomKeyRequest
+                message_type == ToDeviceEventTypes.RoomKeyRequest
                 and user_id != sender_user_id
-                and await self._ratelimiter.can_do_action(
+            ):
+                allowed, _ = await self._ratelimiter.can_do_action(
                     requester, (sender_user_id, requester.device_id)
                 )
-            ):
-                continue
+                if not allowed:
+                    logger.info(
+                        "Dropping room_key_request from %s to %s due to rate limit",
+                        sender_user_id,
+                        user_id,
+                    )
+                    continue
 
             # we use UserID.from_string to catch invalid user ids
             if self.is_mine(UserID.from_string(user_id)):
@@ -237,12 +276,16 @@ class DeviceMessageHandler:
                 "org.matrix.opentracing_context": json_encoder.encode(context),
             }
 
-        stream_id = await self.store.add_messages_to_device_inbox(
+        # Add messages to the database.
+        # Retrieve the stream id of the last-processed to-device message.
+        last_stream_id = await self.store.add_messages_to_device_inbox(
             local_messages, remote_edu_contents
         )
 
+        # Notify listeners that there are new to-device messages to process,
+        # handing them the latest stream id.
         self.notifier.on_new_event(
-            "to_device_key", stream_id, users=local_messages.keys()
+            StreamKeyType.TO_DEVICE, last_stream_id, users=local_messages.keys()
         )
 
         if self.federation_sender:

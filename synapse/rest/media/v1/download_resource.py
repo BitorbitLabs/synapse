@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 # Copyright 2020-2021 The Matrix.org Foundation C.I.C.
 #
@@ -16,10 +15,13 @@
 import logging
 from typing import TYPE_CHECKING
 
-from twisted.web.server import Request
-
-from synapse.http.server import DirectServeJsonResource, set_cors_headers
+from synapse.http.server import (
+    DirectServeJsonResource,
+    set_corp_headers,
+    set_cors_headers,
+)
 from synapse.http.servlet import parse_boolean
+from synapse.http.site import SynapseRequest
 
 from ._base import parse_media_id, respond_404
 
@@ -38,8 +40,9 @@ class DownloadResource(DirectServeJsonResource):
         self.media_repo = media_repo
         self.server_name = hs.hostname
 
-    async def _async_render_GET(self, request: Request) -> None:
+    async def _async_render_GET(self, request: SynapseRequest) -> None:
         set_cors_headers(request)
+        set_corp_headers(request)
         request.setHeader(
             b"Content-Security-Policy",
             b"sandbox;"
@@ -50,6 +53,8 @@ class DownloadResource(DirectServeJsonResource):
             b" media-src 'self';"
             b" object-src 'self';",
         )
+        # Limited non-standard form of CSP for IE11
+        request.setHeader(b"X-Content-Security-Policy", b"sandbox;")
         request.setHeader(
             b"Referrer-Policy",
             b"no-referrer",

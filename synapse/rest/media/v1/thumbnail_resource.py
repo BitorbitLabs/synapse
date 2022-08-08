@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 # Copyright 2020-2021 The Matrix.org Foundation C.I.C.
 #
@@ -16,17 +15,23 @@
 
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from twisted.web.server import Request
-
-from synapse.api.errors import SynapseError
-from synapse.http.server import DirectServeJsonResource, set_cors_headers
+from synapse.api.errors import Codes, SynapseError, cs_error
+from synapse.config.repository import THUMBNAIL_SUPPORTED_MEDIA_FORMAT_MAP
+from synapse.http.server import (
+    DirectServeJsonResource,
+    respond_with_json,
+    set_corp_headers,
+    set_cors_headers,
+)
 from synapse.http.servlet import parse_integer, parse_string
+from synapse.http.site import SynapseRequest
 from synapse.rest.media.v1.media_storage import MediaStorage
 
 from ._base import (
     FileInfo,
+    ThumbnailInfo,
     parse_media_id,
     respond_404,
     respond_with_file,
@@ -51,14 +56,15 @@ class ThumbnailResource(DirectServeJsonResource):
     ):
         super().__init__()
 
-        self.store = hs.get_datastore()
+        self.store = hs.get_datastores().main
         self.media_repo = media_repo
         self.media_storage = media_storage
-        self.dynamic_thumbnails = hs.config.dynamic_thumbnails
+        self.dynamic_thumbnails = hs.config.media.dynamic_thumbnails
         self.server_name = hs.hostname
 
-    async def _async_render_GET(self, request: Request) -> None:
+    async def _async_render_GET(self, request: SynapseRequest) -> None:
         set_cors_headers(request)
+        set_corp_headers(request)
         server_name, media_id, _ = parse_media_id(request)
         width = parse_integer(request, "width", required=True)
         height = parse_integer(request, "height", required=True)
@@ -88,7 +94,7 @@ class ThumbnailResource(DirectServeJsonResource):
 
     async def _respond_local_thumbnail(
         self,
-        request: Request,
+        request: SynapseRequest,
         media_id: str,
         width: int,
         height: int,
@@ -115,13 +121,13 @@ class ThumbnailResource(DirectServeJsonResource):
             thumbnail_infos,
             media_id,
             media_id,
-            url_cache=media_info["url_cache"],
+            url_cache=bool(media_info["url_cache"]),
             server_name=None,
         )
 
     async def _select_or_generate_local_thumbnail(
         self,
-        request: Request,
+        request: SynapseRequest,
         media_id: str,
         desired_width: int,
         desired_height: int,
@@ -150,11 +156,12 @@ class ThumbnailResource(DirectServeJsonResource):
                     server_name=None,
                     file_id=media_id,
                     url_cache=media_info["url_cache"],
-                    thumbnail=True,
-                    thumbnail_width=info["thumbnail_width"],
-                    thumbnail_height=info["thumbnail_height"],
-                    thumbnail_type=info["thumbnail_type"],
-                    thumbnail_method=info["thumbnail_method"],
+                    thumbnail=ThumbnailInfo(
+                        width=info["thumbnail_width"],
+                        height=info["thumbnail_height"],
+                        type=info["thumbnail_type"],
+                        method=info["thumbnail_method"],
+                    ),
                 )
 
                 t_type = file_info.thumbnail_type
@@ -174,7 +181,7 @@ class ThumbnailResource(DirectServeJsonResource):
             desired_height,
             desired_method,
             desired_type,
-            url_cache=media_info["url_cache"],
+            url_cache=bool(media_info["url_cache"]),
         )
 
         if file_path:
@@ -185,7 +192,7 @@ class ThumbnailResource(DirectServeJsonResource):
 
     async def _select_or_generate_remote_thumbnail(
         self,
-        request: Request,
+        request: SynapseRequest,
         server_name: str,
         media_id: str,
         desired_width: int,
@@ -211,11 +218,12 @@ class ThumbnailResource(DirectServeJsonResource):
                 file_info = FileInfo(
                     server_name=server_name,
                     file_id=media_info["filesystem_id"],
-                    thumbnail=True,
-                    thumbnail_width=info["thumbnail_width"],
-                    thumbnail_height=info["thumbnail_height"],
-                    thumbnail_type=info["thumbnail_type"],
-                    thumbnail_method=info["thumbnail_method"],
+                    thumbnail=ThumbnailInfo(
+                        width=info["thumbnail_width"],
+                        height=info["thumbnail_height"],
+                        type=info["thumbnail_type"],
+                        method=info["thumbnail_method"],
+                    ),
                 )
 
                 t_type = file_info.thumbnail_type
@@ -247,7 +255,7 @@ class ThumbnailResource(DirectServeJsonResource):
 
     async def _respond_remote_thumbnail(
         self,
-        request: Request,
+        request: SynapseRequest,
         server_name: str,
         media_id: str,
         width: int,
@@ -272,13 +280,13 @@ class ThumbnailResource(DirectServeJsonResource):
             thumbnail_infos,
             media_id,
             media_info["filesystem_id"],
-            url_cache=None,
+            url_cache=False,
             server_name=server_name,
         )
 
     async def _select_and_respond_with_thumbnail(
         self,
-        request: Request,
+        request: SynapseRequest,
         desired_width: int,
         desired_height: int,
         desired_method: str,
@@ -286,7 +294,7 @@ class ThumbnailResource(DirectServeJsonResource):
         thumbnail_infos: List[Dict[str, Any]],
         media_id: str,
         file_id: str,
-        url_cache: Optional[str] = None,
+        url_cache: bool,
         server_name: Optional[str] = None,
     ) -> None:
         """
@@ -300,9 +308,22 @@ class ThumbnailResource(DirectServeJsonResource):
             desired_type: The desired content-type of the thumbnail.
             thumbnail_infos: A list of dictionaries of candidate thumbnails.
             file_id: The ID of the media that a thumbnail is being requested for.
-            url_cache: The URL cache value.
+            url_cache: True if this is from a URL cache.
             server_name: The server name, if this is a remote thumbnail.
         """
+        logger.debug(
+            "_select_and_respond_with_thumbnail: media_id=%s desired=%sx%s (%s) thumbnail_infos=%s",
+            media_id,
+            desired_width,
+            desired_height,
+            desired_method,
+            thumbnail_infos,
+        )
+
+        # If `dynamic_thumbnails` is enabled, we expect Synapse to go down a
+        # different code path to handle it.
+        assert not self.dynamic_thumbnails
+
         if thumbnail_infos:
             file_info = self._select_thumbnail(
                 desired_width,
@@ -319,13 +340,16 @@ class ThumbnailResource(DirectServeJsonResource):
                 respond_404(request)
                 return
 
+            # The thumbnail property must exist.
+            assert file_info.thumbnail is not None
+
             responder = await self.media_storage.fetch_media(file_info)
             if responder:
                 await respond_with_responder(
                     request,
                     responder,
-                    file_info.thumbnail_type,
-                    file_info.thumbnail_length,
+                    file_info.thumbnail.type,
+                    file_info.thumbnail.length,
                 )
                 return
 
@@ -352,18 +376,18 @@ class ThumbnailResource(DirectServeJsonResource):
                     server_name,
                     file_id=file_id,
                     media_id=media_id,
-                    t_width=file_info.thumbnail_width,
-                    t_height=file_info.thumbnail_height,
-                    t_method=file_info.thumbnail_method,
-                    t_type=file_info.thumbnail_type,
+                    t_width=file_info.thumbnail.width,
+                    t_height=file_info.thumbnail.height,
+                    t_method=file_info.thumbnail.method,
+                    t_type=file_info.thumbnail.type,
                 )
             else:
                 await self.media_repo.generate_local_exact_thumbnail(
                     media_id=media_id,
-                    t_width=file_info.thumbnail_width,
-                    t_height=file_info.thumbnail_height,
-                    t_method=file_info.thumbnail_method,
-                    t_type=file_info.thumbnail_type,
+                    t_width=file_info.thumbnail.width,
+                    t_height=file_info.thumbnail.height,
+                    t_method=file_info.thumbnail.method,
+                    t_type=file_info.thumbnail.type,
                     url_cache=url_cache,
                 )
 
@@ -371,12 +395,33 @@ class ThumbnailResource(DirectServeJsonResource):
             await respond_with_responder(
                 request,
                 responder,
-                file_info.thumbnail_type,
-                file_info.thumbnail_length,
+                file_info.thumbnail.type,
+                file_info.thumbnail.length,
             )
         else:
+            # This might be because:
+            # 1. We can't create thumbnails for the given media (corrupted or
+            #    unsupported file type), or
+            # 2. The thumbnailing process never ran or errored out initially
+            #    when the media was first uploaded (these bugs should be
+            #    reported and fixed).
+            # Note that we don't attempt to generate a thumbnail now because
+            # `dynamic_thumbnails` is disabled.
             logger.info("Failed to find any generated thumbnails")
-            respond_404(request)
+
+            respond_with_json(
+                request,
+                400,
+                cs_error(
+                    "Cannot find any thumbnails for the requested media (%r). This might mean the media is not a supported_media_format=(%s) or that thumbnailing failed for some other reason. (Dynamic thumbnails are disabled on this server.)"
+                    % (
+                        request.postpath,
+                        ", ".join(THUMBNAIL_SUPPORTED_MEDIA_FORMAT_MAP.keys()),
+                    ),
+                    code=Codes.UNKNOWN,
+                ),
+                send_cors=True,
+            )
 
     def _select_thumbnail(
         self,
@@ -386,7 +431,7 @@ class ThumbnailResource(DirectServeJsonResource):
         desired_type: str,
         thumbnail_infos: List[Dict[str, Any]],
         file_id: str,
-        url_cache: Optional[str],
+        url_cache: bool,
         server_name: Optional[str],
     ) -> Optional[FileInfo]:
         """
@@ -399,7 +444,7 @@ class ThumbnailResource(DirectServeJsonResource):
             desired_type: The desired content-type of the thumbnail.
             thumbnail_infos: A list of dictionaries of candidate thumbnails.
             file_id: The ID of the media that a thumbnail is being requested for.
-            url_cache: The URL cache value.
+            url_cache: True if this is from a URL cache.
             server_name: The server name, if this is a remote thumbnail.
 
         Returns:
@@ -415,9 +460,9 @@ class ThumbnailResource(DirectServeJsonResource):
 
         if desired_method == "crop":
             # Thumbnails that match equal or larger sizes of desired width/height.
-            crop_info_list = []
+            crop_info_list: List[Tuple[int, int, int, bool, int, Dict[str, Any]]] = []
             # Other thumbnails.
-            crop_info_list2 = []
+            crop_info_list2: List[Tuple[int, int, int, bool, int, Dict[str, Any]]] = []
             for info in thumbnail_infos:
                 # Skip thumbnails generated with different methods.
                 if info["thumbnail_method"] != "crop":
@@ -452,15 +497,19 @@ class ThumbnailResource(DirectServeJsonResource):
                             info,
                         )
                     )
+            # Pick the most appropriate thumbnail. Some values of `desired_width` and
+            # `desired_height` may result in a tie, in which case we avoid comparing on
+            # the thumbnail info dictionary and pick the thumbnail that appears earlier
+            # in the list of candidates.
             if crop_info_list:
-                thumbnail_info = min(crop_info_list)[-1]
+                thumbnail_info = min(crop_info_list, key=lambda t: t[:-1])[-1]
             elif crop_info_list2:
-                thumbnail_info = min(crop_info_list2)[-1]
+                thumbnail_info = min(crop_info_list2, key=lambda t: t[:-1])[-1]
         elif desired_method == "scale":
             # Thumbnails that match equal or larger sizes of desired width/height.
-            info_list = []
+            info_list: List[Tuple[int, bool, int, Dict[str, Any]]] = []
             # Other thumbnails.
-            info_list2 = []
+            info_list2: List[Tuple[int, bool, int, Dict[str, Any]]] = []
 
             for info in thumbnail_infos:
                 # Skip thumbnails generated with different methods.
@@ -478,22 +527,27 @@ class ThumbnailResource(DirectServeJsonResource):
                     info_list2.append(
                         (size_quality, type_quality, length_quality, info)
                     )
+            # Pick the most appropriate thumbnail. Some values of `desired_width` and
+            # `desired_height` may result in a tie, in which case we avoid comparing on
+            # the thumbnail info dictionary and pick the thumbnail that appears earlier
+            # in the list of candidates.
             if info_list:
-                thumbnail_info = min(info_list)[-1]
+                thumbnail_info = min(info_list, key=lambda t: t[:-1])[-1]
             elif info_list2:
-                thumbnail_info = min(info_list2)[-1]
+                thumbnail_info = min(info_list2, key=lambda t: t[:-1])[-1]
 
         if thumbnail_info:
             return FileInfo(
                 file_id=file_id,
                 url_cache=url_cache,
                 server_name=server_name,
-                thumbnail=True,
-                thumbnail_width=thumbnail_info["thumbnail_width"],
-                thumbnail_height=thumbnail_info["thumbnail_height"],
-                thumbnail_type=thumbnail_info["thumbnail_type"],
-                thumbnail_method=thumbnail_info["thumbnail_method"],
-                thumbnail_length=thumbnail_info["thumbnail_length"],
+                thumbnail=ThumbnailInfo(
+                    width=thumbnail_info["thumbnail_width"],
+                    height=thumbnail_info["thumbnail_height"],
+                    type=thumbnail_info["thumbnail_type"],
+                    method=thumbnail_info["thumbnail_method"],
+                    length=thumbnail_info["thumbnail_length"],
+                ),
             )
 
         # No matching thumbnail was found.

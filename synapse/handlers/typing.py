@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,9 +13,11 @@
 # limitations under the License.
 import logging
 import random
-from collections import namedtuple
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Set, Tuple
 
+import attr
+
+from synapse.api.constants import EduTypes
 from synapse.api.errors import AuthError, ShadowBanError, SynapseError
 from synapse.appservice import ApplicationService
 from synapse.metrics.background_process_metrics import (
@@ -24,7 +25,8 @@ from synapse.metrics.background_process_metrics import (
     wrap_as_background_process,
 )
 from synapse.replication.tcp.streams import TypingStream
-from synapse.types import JsonDict, Requester, UserID, get_domain_from_id
+from synapse.streams import EventSource
+from synapse.types import JsonDict, Requester, StreamKeyType, UserID, get_domain_from_id
 from synapse.util.caches.stream_change_cache import StreamChangeCache
 from synapse.util.metrics import Measure
 from synapse.util.wheel_timer import WheelTimer
@@ -37,7 +39,10 @@ logger = logging.getLogger(__name__)
 
 # A tiny object useful for storing a user's membership in a room, as a mapping
 # key
-RoomMember = namedtuple("RoomMember", ("room_id", "user_id"))
+@attr.s(slots=True, frozen=True, auto_attribs=True)
+class RoomMember:
+    room_id: str
+    user_id: str
 
 
 # How often we expect remote servers to resend us presence.
@@ -53,8 +58,9 @@ class FollowerTypingHandler:
     """
 
     def __init__(self, hs: "HomeServer"):
-        self.store = hs.get_datastore()
-        self.server_name = hs.config.server_name
+        self.store = hs.get_datastores().main
+        self._storage_controllers = hs.get_storage_controllers()
+        self.server_name = hs.config.server.server_name
         self.clock = hs.get_clock()
         self.is_mine_id = hs.is_mine_id
 
@@ -62,19 +68,19 @@ class FollowerTypingHandler:
         if hs.should_send_federation():
             self.federation = hs.get_federation_sender()
 
-        if hs.config.worker.writers.typing != hs.get_instance_name():
-            hs.get_federation_registry().register_instance_for_edu(
-                "m.typing",
+        if hs.get_instance_name() not in hs.config.worker.writers.typing:
+            hs.get_federation_registry().register_instances_for_edu(
+                EduTypes.TYPING,
                 hs.config.worker.writers.typing,
             )
 
         # map room IDs to serial numbers
-        self._room_serials = {}  # type: Dict[str, int]
+        self._room_serials: Dict[str, int] = {}
         # map room IDs to sets of users currently typing
-        self._room_typing = {}  # type: Dict[str, Set[str]]
+        self._room_typing: Dict[str, Set[str]] = {}
 
-        self._member_last_federation_poke = {}  # type: Dict[RoomMember, int]
-        self.wheel_timer = WheelTimer(bucket_size=5000)
+        self._member_last_federation_poke: Dict[RoomMember, int] = {}
+        self.wheel_timer: WheelTimer[RoomMember] = WheelTimer(bucket_size=5000)
         self._latest_room_serial = 0
 
         self.clock.looping_call(self._handle_timeouts, 5000)
@@ -90,7 +96,7 @@ class FollowerTypingHandler:
         self.wheel_timer = WheelTimer(bucket_size=5000)
 
     @wrap_as_background_process("typing._handle_timeouts")
-    def _handle_timeouts(self) -> None:
+    async def _handle_timeouts(self) -> None:
         logger.debug("Checking for typing timeouts")
 
         now = self.clock.time_msec()
@@ -119,14 +125,13 @@ class FollowerTypingHandler:
         self.wheel_timer.insert(now=now, obj=member, then=now + 60 * 1000)
 
     def is_typing(self, member: RoomMember) -> bool:
-        return member.user_id in self._room_typing.get(member.room_id, [])
+        return member.user_id in self._room_typing.get(member.room_id, set())
 
     async def _push_remote(self, member: RoomMember, typing: bool) -> None:
         if not self.federation:
             return
 
         try:
-            users = await self.store.get_users_in_room(member.room_id)
             self._member_last_federation_poke[member] = self.clock.time_msec()
 
             now = self.clock.time_msec()
@@ -134,12 +139,15 @@ class FollowerTypingHandler:
                 now=now, obj=member, then=now + FEDERATION_PING_INTERVAL
             )
 
-            for domain in {get_domain_from_id(u) for u in users}:
+            hosts = await self._storage_controllers.state.get_current_hosts_in_room(
+                member.room_id
+            )
+            for domain in hosts:
                 if domain != self.server_name:
                     logger.debug("sending typing update to %s", domain)
                     self.federation.build_and_send_edu(
                         destination=domain,
-                        edu_type="m.typing",
+                        edu_type=EduTypes.TYPING,
                         content={
                             "room_id": member.room_id,
                             "user_id": member.user_id,
@@ -156,8 +164,9 @@ class FollowerTypingHandler:
         """Should be called whenever we receive updates for typing stream."""
 
         if self._latest_room_serial > token:
-            # The master has gone backwards. To prevent inconsistent data, just
-            # clear everything.
+            # The typing worker has gone backwards (e.g. it may have restarted).
+            # To prevent inconsistent data, just clear everything.
+            logger.info("Typing handler stream went backwards; resetting")
             self._reset()
 
         # Set the latest serial token to whatever the server gave us.
@@ -166,9 +175,9 @@ class FollowerTypingHandler:
         for row in rows:
             self._room_serials[row.room_id] = token
 
-            prev_typing = set(self._room_typing.get(row.room_id, []))
+            prev_typing = self._room_typing.get(row.room_id, set())
             now_typing = set(row.user_ids)
-            self._room_typing[row.room_id] = row.user_ids
+            self._room_typing[row.room_id] = now_typing
 
             if self.federation:
                 run_as_background_process(
@@ -205,19 +214,22 @@ class TypingWriterHandler(FollowerTypingHandler):
     def __init__(self, hs: "HomeServer"):
         super().__init__(hs)
 
-        assert hs.config.worker.writers.typing == hs.get_instance_name()
+        assert hs.get_instance_name() in hs.config.worker.writers.typing
 
         self.auth = hs.get_auth()
         self.notifier = hs.get_notifier()
+        self.event_auth_handler = hs.get_event_auth_handler()
 
         self.hs = hs
 
-        hs.get_federation_registry().register_edu_handler("m.typing", self._recv_edu)
+        hs.get_federation_registry().register_edu_handler(
+            EduTypes.TYPING, self._recv_edu
+        )
 
         hs.get_distributor().observe("user_left_room", self.user_left_room)
 
         # clock time we expect to stop
-        self._member_typing_until = {}  # type: Dict[RoomMember, int]
+        self._member_typing_until: Dict[RoomMember, int] = {}
 
         # caches which room_ids changed at which serials
         self._typing_stream_change_cache = StreamChangeCache(
@@ -327,6 +339,20 @@ class TypingWriterHandler(FollowerTypingHandler):
         room_id = content["room_id"]
         user_id = content["user_id"]
 
+        # If we're not in the room just ditch the event entirely. This is
+        # probably an old server that has come back and thinks we're still in
+        # the room (or we've been rejoined to the room by a state reset).
+        is_in_room = await self.event_auth_handler.check_host_in_room(
+            room_id, self.server_name
+        )
+        if not is_in_room:
+            logger.info(
+                "Ignoring typing update for room %r from server %s as we're not in the room",
+                room_id,
+                origin,
+            )
+            return
+
         member = RoomMember(user_id=user_id, room_id=room_id)
 
         # Check that the string is a valid user id
@@ -362,7 +388,7 @@ class TypingWriterHandler(FollowerTypingHandler):
         )
 
         self.notifier.on_new_event(
-            "typing_key", self._latest_room_serial, rooms=[member.room_id]
+            StreamKeyType.TYPING, self._latest_room_serial, rooms=[member.room_id]
         )
 
     async def get_all_typing_updates(
@@ -392,9 +418,9 @@ class TypingWriterHandler(FollowerTypingHandler):
         if last_id == current_id:
             return [], current_id, False
 
-        changed_rooms = self._typing_stream_change_cache.get_all_entities_changed(
-            last_id
-        )  # type: Optional[Iterable[str]]
+        changed_rooms: Optional[
+            Iterable[str]
+        ] = self._typing_stream_change_cache.get_all_entities_changed(last_id)
 
         if changed_rooms is None:
             changed_rooms = self._room_serials
@@ -425,9 +451,9 @@ class TypingWriterHandler(FollowerTypingHandler):
         raise Exception("Typing writer instance got typing info over replication")
 
 
-class TypingNotificationEventSource:
+class TypingNotificationEventSource(EventSource[int, JsonDict]):
     def __init__(self, hs: "HomeServer"):
-        self.hs = hs
+        self._main_store = hs.get_datastores().main
         self.clock = hs.get_clock()
         # We can't call get_typing_handler here because there's a cycle:
         #
@@ -438,7 +464,7 @@ class TypingNotificationEventSource:
     def _make_event_for(self, room_id: str) -> JsonDict:
         typing = self.get_typing_handler()._room_typing[room_id]
         return {
-            "type": "m.typing",
+            "type": EduTypes.TYPING,
             "room_id": room_id,
             "content": {"user_ids": list(typing)},
         }
@@ -450,28 +476,38 @@ class TypingNotificationEventSource:
         may be interested in.
 
         Args:
-            from_key: the stream position at which events should be fetched from
-            service: The appservice which may be interested
+            from_key: the stream position at which events should be fetched from.
+            service: The appservice which may be interested.
+
+        Returns:
+            A two-tuple containing the following:
+                * A list of json dictionaries derived from typing events that the
+                  appservice may be interested in.
+                * The latest known room serial.
         """
         with Measure(self.clock, "typing.get_new_events_as"):
-            from_key = int(from_key)
             handler = self.get_typing_handler()
 
             events = []
             for room_id in handler._room_serials.keys():
                 if handler._room_serials[room_id] <= from_key:
                     continue
-                if not await service.matches_user_in_member_list(
-                    room_id, handler.store
-                ):
+
+                if not await service.is_interested_in_room(room_id, self._main_store):
                     continue
 
                 events.append(self._make_event_for(room_id))
 
-            return (events, handler._latest_room_serial)
+            return events, handler._latest_room_serial
 
     async def get_new_events(
-        self, from_key: int, room_ids: Iterable[str], **kwargs
+        self,
+        user: UserID,
+        from_key: int,
+        limit: Optional[int],
+        room_ids: Iterable[str],
+        is_guest: bool,
+        explicit_room_id: Optional[str] = None,
     ) -> Tuple[List[JsonDict], int]:
         with Measure(self.clock, "typing.get_new_events"):
             from_key = int(from_key)
@@ -486,7 +522,7 @@ class TypingNotificationEventSource:
 
                 events.append(self._make_event_for(room_id))
 
-            return (events, handler._latest_room_serial)
+            return events, handler._latest_room_serial
 
     def get_current_key(self) -> int:
         return self.get_typing_handler()._latest_room_serial

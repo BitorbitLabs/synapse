@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2020 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,17 +13,20 @@
 # limitations under the License.
 
 import logging
-from typing import Any, List, Set, Tuple
+from typing import Any, List, Set, Tuple, cast
 
 from synapse.api.errors import SynapseError
-from synapse.storage._base import SQLBaseStore
+from synapse.storage.database import LoggingTransaction
+from synapse.storage.databases.main import CacheInvalidationWorkerStore
 from synapse.storage.databases.main.state import StateGroupWorkerStore
+from synapse.storage.engines import PostgresEngine
+from synapse.storage.engines._base import IsolationLevel
 from synapse.types import RoomStreamToken
 
 logger = logging.getLogger(__name__)
 
 
-class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
+class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
     async def purge_history(
         self, room_id: str, token: str, delete_local_events: bool
     ) -> Set[int]:
@@ -56,7 +58,11 @@ class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
         )
 
     def _purge_history_txn(
-        self, txn, room_id: str, token: RoomStreamToken, delete_local_events: bool
+        self,
+        txn: LoggingTransaction,
+        room_id: str,
+        token: RoomStreamToken,
+        delete_local_events: bool,
     ) -> Set[int]:
         # Tables that should be pruned:
         #     event_auth
@@ -65,7 +71,6 @@ class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
         #     event_forward_extremities
         #     event_json
         #     event_push_actions
-        #     event_reference_hashes
         #     event_relations
         #     event_search
         #     event_to_state_groups
@@ -103,20 +108,24 @@ class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
             (room_id,),
         )
         rows = txn.fetchall()
-        max_depth = max(row[1] for row in rows)
+        # if we already have no forwards extremities (for example because they were
+        # cleared out by the `delete_old_current_state_events` background database
+        # update), then we may as well carry on.
+        if rows:
+            max_depth = max(row[1] for row in rows)
 
-        if max_depth < token.topological:
-            # We need to ensure we don't delete all the events from the database
-            # otherwise we wouldn't be able to send any events (due to not
-            # having any backwards extremities)
-            raise SynapseError(
-                400, "topological_ordering is greater than forward extremeties"
-            )
+            if max_depth < token.topological:
+                # We need to ensure we don't delete all the events from the database
+                # otherwise we wouldn't be able to send any events (due to not
+                # having any backwards extremities)
+                raise SynapseError(
+                    400, "topological_ordering is greater than forward extremities"
+                )
 
         logger.info("[purge] looking for events to delete")
 
-        should_delete_expr = "state_key IS NULL"
-        should_delete_params = ()  # type: Tuple[Any, ...]
+        should_delete_expr = "state_events.state_key IS NULL"
+        should_delete_params: Tuple[Any, ...] = ()
         if not delete_local_events:
             should_delete_expr += " AND event_id NOT LIKE ?"
 
@@ -204,20 +213,18 @@ class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
             "DELETE FROM event_to_state_groups "
             "WHERE event_id IN (SELECT event_id from events_to_purge)"
         )
-        for event_id, _ in event_rows:
-            txn.call_after(self._get_state_group_for_event.invalidate, (event_id,))
 
         # Delete all remote non-state events
         for table in (
+            "event_edges",
             "events",
             "event_json",
             "event_auth",
-            "event_edges",
             "event_forward_extremities",
-            "event_reference_hashes",
             "event_relations",
             "event_search",
             "rejections",
+            "redactions",
         ):
             logger.info("[purge] removing events from %s", table)
 
@@ -271,7 +278,7 @@ class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
         """,
             (room_id,),
         )
-        (min_depth,) = txn.fetchone()
+        (min_depth,) = cast(Tuple[int], txn.fetchone())
 
         logger.info("[purge] updating room_depth to %d", min_depth)
 
@@ -283,6 +290,21 @@ class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
         # finally, drop the temp table. this will commit the txn in sqlite,
         # so make sure to keep this actually last.
         txn.execute("DROP TABLE events_to_purge")
+
+        for event_id, should_delete in event_rows:
+            self._invalidate_cache_and_stream(
+                txn, self._get_state_group_for_event, (event_id,)
+            )
+
+            # XXX: This is racy, since have_seen_events could be called between the
+            #    transaction completing and the invalidation running. On the other hand,
+            #    that's no different to calling `have_seen_events` just before the
+            #    event is deleted from the database.
+            if should_delete:
+                self._invalidate_cache_and_stream(
+                    txn, self.have_seen_event, (room_id, event_id)
+                )
+                self.invalidate_get_event_cache_after_txn(txn, event_id)
 
         logger.info("[purge] done")
 
@@ -297,12 +319,39 @@ class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
         Returns:
             The list of state groups to delete.
         """
-        return await self.db_pool.runInteraction(
-            "purge_room", self._purge_room_txn, room_id
+
+        # This first runs the purge transaction with READ_COMMITTED isolation level,
+        # meaning any new rows in the tables will not trigger a serialization error.
+        # We then run the same purge a second time without this isolation level to
+        # purge any of those rows which were added during the first.
+
+        state_groups_to_delete = await self.db_pool.runInteraction(
+            "purge_room",
+            self._purge_room_txn,
+            room_id=room_id,
+            isolation_level=IsolationLevel.READ_COMMITTED,
         )
 
-    def _purge_room_txn(self, txn, room_id: str) -> List[int]:
-        # First we fetch all the state groups that should be deleted, before
+        state_groups_to_delete.extend(
+            await self.db_pool.runInteraction(
+                "purge_room",
+                self._purge_room_txn,
+                room_id=room_id,
+            ),
+        )
+
+        return state_groups_to_delete
+
+    def _purge_room_txn(self, txn: LoggingTransaction, room_id: str) -> List[int]:
+        # This collides with event persistence so we cannot write new events and metadata into
+        # a room while deleting it or this transaction will fail.
+        if isinstance(self.database_engine, PostgresEngine):
+            txn.execute(
+                "SELECT room_version FROM rooms WHERE room_id = ? FOR UPDATE",
+                (room_id,),
+            )
+
+        # First, fetch all the state groups that should be deleted, before
         # we delete that information.
         txn.execute(
             """
@@ -342,7 +391,6 @@ class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
             "event_edges",
             "event_json",
             "event_push_actions_staging",
-            "event_reference_hashes",
             "event_relations",
             "event_to_state_groups",
             "event_auth_chains",
@@ -363,7 +411,7 @@ class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
                 (room_id,),
             )
 
-        # and finally, the tables with an index on room_id (or no useful index)
+        # next, the tables with an index on room_id (or no useful index)
         for table in (
             "current_state_events",
             "destination_rooms",
@@ -371,9 +419,12 @@ class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
             "event_forward_extremities",
             "event_push_actions",
             "event_search",
+            "partial_state_events",
             "events",
-            "group_rooms",
-            "public_room_list_stream",
+            "federation_inbound_events_staging",
+            "local_current_membership",
+            "partial_state_rooms_servers",
+            "partial_state_rooms",
             "receipts_graph",
             "receipts_linearized",
             "room_aliases",
@@ -381,9 +432,7 @@ class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
             "room_memberships",
             "room_stats_state",
             "room_stats_current",
-            "room_stats_historical",
             "room_stats_earliest_token",
-            "rooms",
             "stream_ordering_to_exterm",
             "users_in_public_rooms",
             "users_who_share_private_rooms",
@@ -392,10 +441,11 @@ class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
             "e2e_room_keys",
             "event_push_summary",
             "pusher_throttle",
-            "group_summary_rooms",
             "room_account_data",
             "room_tags",
-            "local_current_membership",
+            # "rooms" happens last, to keep the foreign keys in the other tables
+            # happy
+            "rooms",
         ):
             logger.info("[purge] removing %s from %s", room_id, table)
             txn.execute("DELETE FROM %s WHERE room_id=?" % (table,), (room_id,))
@@ -423,7 +473,11 @@ class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
         #       index on them. In any case we should be clearing out 'stream' tables
         #       periodically anyway (#5888)
 
-        # TODO: we could probably usefully do a bunch of cache invalidation here
+        # TODO: we could probably usefully do a bunch more cache invalidation here
+
+        # XXX: as with purge_history, this is racy, but no worse than other races
+        #   that already exist.
+        self._invalidate_cache_and_stream(txn, self.have_seen_event, (room_id,))
 
         logger.info("[purge] done")
 
