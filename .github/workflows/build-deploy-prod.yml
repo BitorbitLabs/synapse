@@ -21,7 +21,7 @@ jobs:
           DOCKER_BUILDKIT: 1
         run: |
           gcloud auth configure-docker ${{ secrets.GAR_PROD }} -q
-          docker build -t $REPO/$APP_NAME:$IMAGE_TAG .
+          docker build -t $REPO/$APP_NAME:$IMAGE_TAG . -f docker/Dockerfile
           docker tag $REPO/$APP_NAME:$IMAGE_TAG $REPO/$APP_NAME:${{ github.ref_name }}
           docker push $REPO/$APP_NAME:$IMAGE_TAG
           docker push $REPO/$APP_NAME:${{ github.ref_name }}
