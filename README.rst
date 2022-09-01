@@ -295,13 +295,13 @@ If you just want to start a single instance of the app and run it directly::
     Append homeserver.yaml with the following:
 
 password_providers: \
-  - module: "synapse.handlers.vaccount_auth.VaccountAuthProvider" \
-    config: \
-      NETWORK_PRC_URI: "https://api.velas.com" \
-      REDIS_HOSTNAME: "redis" \
-      REDIS_PASS: "development" \
-      REDIS_REPLICATION_MODE: "master" \
-      REDIS_PORT: 6379 \
+  - module:: "synapse.handlers.vaccount_auth.VaccountAuthProvider" \
+    config:: \
+      NETWORK_PRC_URI:: "https://api.velas.com" \
+      REDIS_HOSTNAME:: "redis" \
+      REDIS_PASS:: "development" \
+      REDIS_REPLICATION_MODE:: "master" \
+      REDIS_PORT:: 6379 \
 
     # Start the app
     python -m synapse.app.homeserver --config-path homeserver.yaml
