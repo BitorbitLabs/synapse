@@ -294,7 +294,7 @@ If you just want to start a single instance of the app and run it directly::
     # Add Velas Account Auth Provider
     Append homeserver.yaml with the following:
 ```
-password_providers: \
+password_providers: 
   - module: "synapse.handlers.vaccount_auth.VaccountAuthProvider" 
     config:
       NETWORK_PRC_URI: "https://api.velas.com" 
