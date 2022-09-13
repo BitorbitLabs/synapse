@@ -183,8 +183,9 @@ Using a reverse proxy with Synapse
 It is recommended to put a reverse proxy such as
 `nginx <https://nginx.org/en/docs/http/ngx_http_proxy_module.html>`_,
 `Apache <https://httpd.apache.org/docs/current/mod/mod_proxy_http.html>`_,
-`Caddy <https://caddyserver.com/docs/quick-starts/reverse-proxy>`_ or
-`HAProxy <https://www.haproxy.org/>`_ in front of Synapse. One advantage of
+`Caddy <https://caddyserver.com/docs/quick-starts/reverse-proxy>`_,
+`HAProxy <https://www.haproxy.org/>`_ or
+`relayd <https://man.openbsd.org/relayd.8>`_ in front of Synapse. One advantage of
 doing so is that it means that you can expose the default https port (443) to
 Matrix clients without needing to run Synapse with root privileges.
 
@@ -280,11 +281,6 @@ differ)::
 
     PASSED (skips=15, successes=1322)
 
-We recommend using the demo which starts 3 federated instances running on ports `8080` - `8082`
-
-    ./demo/start.sh
-
-(to stop, you can use `./demo/stop.sh`)
 
 If you just want to start a single instance of the app and run it directly::
 
@@ -295,6 +291,18 @@ If you just want to start a single instance of the app and run it directly::
       --generate-config \
       --report-stats=[yes|no]
 
+    # Add Velas Account Auth Provider
+    Append homeserver.yaml with the following:
+```
+password_providers: 
+  - module: "synapse.handlers.vaccount_auth.VaccountAuthProvider" 
+    config:
+      NETWORK_PRC_URI: "https://api.velas.com" 
+      REDIS_HOSTNAME: "redis" 
+      REDIS_PASS: "development" 
+      REDIS_REPLICATION_MODE: "master" 
+      REDIS_PORT: 6379 
+```
     # Start the app
     python -m synapse.app.homeserver --config-path homeserver.yaml
 
@@ -312,6 +320,15 @@ the source tree, so installation of the server is not required.
 Testing with SyTest is recommended for verifying that changes related to the
 Client-Server API are functioning correctly. See the `installation instructions
 <https://github.com/matrix-org/sytest#installing>`_ for details.
+
+
+Platform dependencies
+=====================
+
+Synapse uses a number of platform dependencies such as Python and PostgreSQL,
+and aims to follow supported upstream versions. See the
+`<docs/deprecation_policy.md>`_ document for more details.
+
 
 Troubleshooting
 ===============
@@ -383,12 +400,17 @@ massive excess of outgoing federation requests (see `discussion
 indicate that your server is also issuing far more outgoing federation
 requests than can be accounted for by your users' activity, this is a
 likely cause. The misbehavior can be worked around by setting
-``use_presence: false`` in the Synapse config file.
+the following in the Synapse config file:
+
+.. code-block:: yaml
+
+   presence:
+       enabled: false
 
 People can't accept room invitations from me
 --------------------------------------------
 
-The typical failure mode here is that you send an invitation to someone 
+The typical failure mode here is that you send an invitation to someone
 to join a room or direct chat, but when they go to accept it, they get an
 error (typically along the lines of "Invalid signature"). They might see
 something like the following in their logs::

@@ -85,6 +85,72 @@ for example:
      wget https://packages.matrix.org/debian/pool/main/m/matrix-synapse-py3/matrix-synapse-py3_1.3.0+stretch1_amd64.deb
      dpkg -i matrix-synapse-py3_1.3.0+stretch1_amd64.deb
 
+Upgrading to v1.32.0
+====================
+
+Regression causing connected Prometheus instances to become overwhelmed
+-----------------------------------------------------------------------
+
+This release introduces `a regression <https://github.com/matrix-org/synapse/issues/9853>`_
+that can overwhelm connected Prometheus instances. This issue is not present in
+Synapse v1.32.0rc1.
+
+If you have been affected, please downgrade to 1.31.0. You then may need to
+remove excess writeahead logs in order for Prometheus to recover. Instructions
+for doing so are provided
+`here <https://github.com/matrix-org/synapse/pull/9854#issuecomment-823472183>`_.
+
+Dropping support for old Python, Postgres and SQLite versions
+-------------------------------------------------------------
+
+In line with our `deprecation policy <https://github.com/matrix-org/synapse/blob/release-v1.32.0/docs/deprecation_policy.md>`_,
+we've dropped support for Python 3.5 and PostgreSQL 9.5, as they are no longer supported upstream.
+
+This release of Synapse requires Python 3.6+ and PostgresSQL 9.6+ or SQLite 3.22+.
+
+Removal of old List Accounts Admin API
+--------------------------------------
+
+The deprecated v1 "list accounts" admin API (``GET /_synapse/admin/v1/users/<user_id>``) has been removed in this version.
+
+The `v2 list accounts API <https://github.com/matrix-org/synapse/blob/master/docs/admin_api/user_admin_api.rst#list-accounts>`_
+has been available since Synapse 1.7.0 (2019-12-13), and is accessible under ``GET /_synapse/admin/v2/users``.
+
+The deprecation of the old endpoint was announced with Synapse 1.28.0 (released on 2021-02-25).
+
+Application Services must use type ``m.login.application_service`` when registering users
+-----------------------------------------------------------------------------------------
+
+In compliance with the
+`Application Service spec <https://matrix.org/docs/spec/application_service/r0.1.2#server-admin-style-permissions>`_,
+Application Services are now required to use the ``m.login.application_service`` type when registering users via the
+``/_matrix/client/r0/register`` endpoint. This behaviour was deprecated in Synapse v1.30.0.
+
+Please ensure your Application Services are up to date.
+
+Upgrading to v1.29.0
+====================
+
+Requirement for X-Forwarded-Proto header
+----------------------------------------
+
+When using Synapse with a reverse proxy (in particular, when using the
+`x_forwarded` option on an HTTP listener), Synapse now expects to receive an
+`X-Forwarded-Proto` header on incoming HTTP requests. If it is not set, Synapse
+will log a warning on each received request.
+
+To avoid the warning, administrators using a reverse proxy should ensure that
+the reverse proxy sets `X-Forwarded-Proto` header to `https` or `http` to
+indicate the protocol used by the client.
+
+Synapse also requires the `Host` header to be preserved.
+
+See the `reverse proxy documentation <docs/reverse_proxy.md>`_, where the
+example configurations have been updated to show how to set these headers.
+
+(Users of `Caddy <https://caddyserver.com/>`_ are unaffected, since we believe it
+sets `X-Forwarded-Proto` by default.)
+
 Upgrading to v1.27.0
 ====================
 
@@ -103,6 +169,13 @@ This version changes the URI used for callbacks from OAuth2 and SAML2 identity p
 * If your server is configured for single sign-on via a SAML2 identity provider, you will
   need to add ``[synapse public baseurl]/_synapse/client/saml2/authn_response`` as a permitted
   "ACS location" (also known as "allowed callback URLs") at the identity provider.
+
+  The "Issuer" in the "AuthnRequest" to the SAML2 identity provider is also updated to
+  ``[synapse public baseurl]/_synapse/client/saml2/metadata.xml``. If your SAML2 identity
+  provider uses this property to validate or otherwise identify Synapse, its configuration
+  will need to be updated to use the new URL. Alternatively you could create a new, separate
+  "EntityDescriptor" in your SAML2 identity provider with the new URLs and leave the URLs in
+  the existing "EntityDescriptor" as they were.
 
 Changes to HTML templates
 -------------------------

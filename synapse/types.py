@@ -15,8 +15,8 @@
 # limitations under the License.
 import abc
 import re
-import string
 import sys
+import string
 from collections import namedtuple
 from typing import (
     TYPE_CHECKING,
@@ -35,7 +35,16 @@ from typing import (
 import attr
 from signedjson.key import decode_verify_key_bytes
 from unpaddedbase64 import decode_base64
+from zope.interface import Interface
 
+from twisted.internet.interfaces import (
+    IReactorCore,
+    IReactorPluggableNameResolver,
+    IReactorTCP,
+    IReactorTime,
+)
+
+from synapse.api.constants import USERID_BYTES_LENGTH
 from synapse.api.errors import Codes, SynapseError
 from synapse.util.stringutils import parse_and_validate_server_name
 
@@ -67,32 +76,39 @@ MutableStateMap = MutableMapping[StateKey, T]
 JsonDict = Dict[str, Any]
 
 
-class Requester(
-    namedtuple(
-        "Requester",
-        [
-            "user",
-            "access_token_id",
-            "is_guest",
-            "shadow_banned",
-            "device_id",
-            "app_service",
-            "authenticated_entity",
-        ],
-    )
+# Note that this seems to require inheriting *directly* from Interface in order
+# for mypy-zope to realize it is an interface.
+class ISynapseReactor(
+    IReactorTCP, IReactorPluggableNameResolver, IReactorTime, IReactorCore, Interface
 ):
+    """The interfaces necessary for Synapse to function."""
+
+
+@attr.s(frozen=True, slots=True)
+class Requester:
     """
     Represents the user making a request
 
     Attributes:
-        user (UserID):  id of the user making the request
-        access_token_id (int|None):  *ID* of the access token used for this
+        user:  id of the user making the request
+        access_token_id:  *ID* of the access token used for this
             request, or None if it came via the appservice API or similar
-        is_guest (bool):  True if the user making this request is a guest user
-        shadow_banned (bool):  True if the user making this request has been shadow-banned.
-        device_id (str|None):  device_id which was set at authentication time
-        app_service (ApplicationService|None):  the AS requesting on behalf of the user
+        is_guest:  True if the user making this request is a guest user
+        shadow_banned:  True if the user making this request has been shadow-banned.
+        device_id:  device_id which was set at authentication time
+        app_service:  the AS requesting on behalf of the user
+        authenticated_entity: The entity that authenticated when making the request.
+            This is different to the user_id when an admin user or the server is
+            "puppeting" the user.
     """
+
+    user = attr.ib(type="UserID")
+    access_token_id = attr.ib(type=Optional[int])
+    is_guest = attr.ib(type=bool)
+    shadow_banned = attr.ib(type=bool)
+    device_id = attr.ib(type=Optional[str])
+    app_service = attr.ib(type=Optional["ApplicationService"])
+    authenticated_entity = attr.ib(type=str)
 
     def serialize(self):
         """Converts self to a type that can be serialized as JSON, and then
@@ -141,23 +157,23 @@ class Requester(
 def create_requester(
     user_id: Union[str, "UserID"],
     access_token_id: Optional[int] = None,
-    is_guest: Optional[bool] = False,
-    shadow_banned: Optional[bool] = False,
+    is_guest: bool = False,
+    shadow_banned: bool = False,
     device_id: Optional[str] = None,
     app_service: Optional["ApplicationService"] = None,
     authenticated_entity: Optional[str] = None,
-):
+) -> Requester:
     """
     Create a new ``Requester`` object
 
     Args:
-        user_id (str|UserID):  id of the user making the request
-        access_token_id (int|None):  *ID* of the access token used for this
+        user_id:  id of the user making the request
+        access_token_id:  *ID* of the access token used for this
             request, or None if it came via the appservice API or similar
-        is_guest (bool):  True if the user making this request is a guest user
-        shadow_banned (bool):  True if the user making this request is shadow-banned.
-        device_id (str|None):  device_id which was set at authentication time
-        app_service (ApplicationService|None):  the AS requesting on behalf of the user
+        is_guest:  True if the user making this request is a guest user
+        shadow_banned:  True if the user making this request is shadow-banned.
+        device_id:  device_id which was set at authentication time
+        app_service:  the AS requesting on behalf of the user
         authenticated_entity: The entity that authenticated when making the request.
             This is different to the user_id when an admin user or the server is
             "puppeting" the user.
@@ -319,7 +335,7 @@ class GroupID(DomainSpecificString):
 
 
 mxid_localpart_allowed_characters = set(
-    "_-./=" + string.ascii_lowercase + string.digits
+    "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 )
 
 
@@ -332,7 +348,26 @@ def contains_invalid_mxid_characters(localpart: str) -> bool:
     Returns:
         True if there are any naughty characters
     """
-    return any(c not in mxid_localpart_allowed_characters for c in localpart)
+    is_invalid_characters = any(c not in string.hexdigits for c in localpart[2:])
+    is_invalid_hex_pre = not localpart.startswith('0x')
+    return is_invalid_characters or is_invalid_hex_pre
+
+
+def is_valid_mxid_len(localpart: str) -> bool:
+    """Check that mxid a 32 bytes after decoding from base58
+
+    Args:
+        localpart: the localpath to be checked
+
+    Returns:
+        True if the localpart 32 bytes
+    """
+    if localpart.startswith('0x'):
+        localpart = localpart[2:]
+
+    mxid_bytes = bytes.fromhex(localpart)
+
+    return len(mxid_bytes) == USERID_BYTES_LENGTH
 
 
 UPPER_CASE_PATTERN = re.compile(b"[A-Z_]")
@@ -355,52 +390,25 @@ NON_MXID_CHARACTER_PATTERN = re.compile(
 )
 
 
-def map_username_to_mxid_localpart(
-    username: Union[str, bytes], case_sensitive: bool = False
-) -> str:
+def map_username_to_mxid_localpart(username: Union[str, bytes]) -> str:
     """Map a username onto a string suitable for a MXID
 
-    This follows the algorithm laid out at
-    https://matrix.org/docs/spec/appendices.html#mapping-from-other-character-sets.
+    This follows the 32 bytes in base58 encoding.
 
     Args:
         username: username to be mapped
-        case_sensitive: true if TEST and test should be mapped
-            onto different mxids
 
     Returns:
         unicode: string suitable for a mxid localpart
     """
-    if not isinstance(username, bytes):
-        username = username.encode("utf-8")
+    if isinstance(username, str):
+        return username
 
-    # first we sort out upper-case characters
-    if case_sensitive:
+    # Encode bytes to base58
+    username = username.hex()
 
-        def f1(m):
-            return b"_" + m.group().lower()
-
-        username = UPPER_CASE_PATTERN.sub(f1, username)
-    else:
-        username = username.lower()
-
-    # then we sort out non-ascii characters
-    def f2(m):
-        g = m.group()[0]
-        if isinstance(g, str):
-            # on python 2, we need to do a ord(). On python 3, the
-            # byte itself will do.
-            g = ord(g)
-        return b"=%02x" % (g,)
-
-    username = NON_MXID_CHARACTER_PATTERN.sub(f2, username)
-
-    # we also do the =-escaping to mxids starting with an underscore.
-    username = re.sub(b"^_", b"=5f", username)
-
-    # we should now only have ascii bytes left, so can decode back to a
-    # unicode.
-    return username.decode("ascii")
+    # Decode binary string to utf-8
+    return username
 
 
 @attr.s(frozen=True, slots=True, cmp=False)

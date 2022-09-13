@@ -13,8 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-
-from mock import Mock
+from unittest.mock import Mock
 
 from twisted.internet import defer
 
@@ -95,7 +94,7 @@ class PusherShardTestCase(BaseMultiWorkerStreamTestCase):
 
         self.make_worker_hs(
             "synapse.app.pusher",
-            {"start_pushers": True},
+            {"start_pushers": False},
             proxied_blacklisted_http_client=http_client_mock,
         )
 

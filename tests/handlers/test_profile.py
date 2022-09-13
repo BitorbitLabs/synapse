@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from mock import Mock
+from unittest.mock import Mock
 
 import synapse.types
 from synapse.api.errors import AuthError, SynapseError
@@ -161,7 +161,11 @@ class ProfileTestCase(unittest.HomeserverTestCase):
 
         response = self.get_success(
             self.query_handlers["profile"](
-                {"user_id": "@caroline:test", "field": "displayname"}
+                {
+                    "user_id": "@caroline:test",
+                    "field": "displayname",
+                    "origin": "servername.tld",
+                }
             )
         )
 
