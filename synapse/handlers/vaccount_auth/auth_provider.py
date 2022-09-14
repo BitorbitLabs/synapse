@@ -238,7 +238,7 @@ class VaccountAuthProvider:
     async def _get_parsed_account_info(self, account_address):
         """
         """
-        testnet = 'https://testnet.velas.com/rpc'
+        mainnet = 'https://mainnet.velas.com/rpc'
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -252,7 +252,7 @@ class VaccountAuthProvider:
         }
         try:
             account_data = await self.account_handler.http_client.post_json_get_json(
-                uri=testnet,
+                uri=mainnet,
                 post_json=payload,
             )
         except HttpResponseException as e:
