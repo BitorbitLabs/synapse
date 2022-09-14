@@ -1,7 +1,7 @@
 name: Build-Deploy-Prod
 on:
   push:
-    branches: [feature/vaccount_auth_provider]
+    branches: [master]
 
 env: 
   APP_NAME: bitorbit-synapse
@@ -37,9 +37,6 @@ jobs:
           repository: BitorbitLabs/bitorbit-prod-infra
           ref: master
           ssh-key: ${{ secrets.SSH_KEY_PROD_INFRA }}
-      - uses: google-github-actions/setup-gcloud@v0
-      - name: Authenticate to GAR Helm registry
-        run: gcloud auth configure-docker ${{ secrets.GAR_PROD }} -q
       - name: Deploy via helmfile
         id: deploy
         env:
