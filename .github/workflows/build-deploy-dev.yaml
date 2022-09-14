@@ -1,7 +1,7 @@
-name: Build-Deploy-devnet(auth-provider)
+name: Build-Deploy-Dev
 on:
   push:
-    branches: [feature/vaccount_auth_provider]
+    branches: [develop]
 
 env: 
   APP_NAME: bitorbit-synapse-auth-provider
@@ -10,7 +10,7 @@ env:
 jobs:
   docker-build:
     name: Build and push
-    runs-on:  devnet-services
+    runs-on: devnet-services
     outputs:
       repository: ${{ steps.build.outputs.repository }}
       image_tag: ${{ steps.build.outputs.image_tag }}
