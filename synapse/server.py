@@ -85,6 +85,7 @@ from synapse.handlers.identity import IdentityHandler
 from synapse.handlers.initial_sync import InitialSyncHandler
 from synapse.handlers.message import EventCreationHandler, MessageHandler
 from synapse.handlers.pagination import PaginationHandler
+from synapse.handlers.invalidate import InvalidateHandler
 from synapse.handlers.password_policy import PasswordPolicyHandler
 from synapse.handlers.presence import PresenceHandler
 from synapse.handlers.profile import ProfileHandler
@@ -674,6 +675,10 @@ class HomeServer(metaclass=abc.ABCMeta):
     @cache_in_self
     def get_pagination_handler(self) -> PaginationHandler:
         return PaginationHandler(self)
+
+    @cache_in_self
+    def get_invalidate_handler(self) -> InvalidateHandler:
+        return InvalidateHandler(self)
 
     @cache_in_self
     def get_room_context_handler(self) -> RoomContextHandler:
