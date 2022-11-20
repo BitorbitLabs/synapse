@@ -291,18 +291,18 @@ If you just want to start a single instance of the app and run it directly::
       --generate-config \
       --report-stats=[yes|no]
 
-    # Add Velas Account Auth Provider
-    Append homeserver.yaml with the following:
-```
-password_providers: 
-  - module: "synapse.handlers.vaccount_auth.VaccountAuthProvider" 
-    config:
-      NETWORK_PRC_URI: "https://api.velas.com" 
-      REDIS_HOSTNAME: "redis" 
-      REDIS_PASS: "development" 
-      REDIS_REPLICATION_MODE: "master" 
-      REDIS_PORT: 6379 
-```
+To add Velas Account Auth Provider, append homeserver.yaml with the following::
+
+    password_providers: 
+      - module: "synapse.handlers.vaccount_auth.VaccountAuthProvider" 
+        config:
+          VELAS_API_URI: "https://api.velas.com"
+          VELAS_RPC_URI: "https://mainnet.velas.com/rpc"
+          REDIS_HOSTNAME: "redis" 
+          REDIS_PASS: "development" 
+          REDIS_REPLICATION_MODE: "master" 
+          REDIS_PORT: 6379 
+
     # Start the app
     python -m synapse.app.homeserver --config-path homeserver.yaml
 

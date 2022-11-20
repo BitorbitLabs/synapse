@@ -12,7 +12,8 @@ from borsh_construct import (
 
 VACCOUNT_PROGRAM_ID = PublicKey("VAcccHVjpknkW5N5R9sfRppQxYJrJYVV7QJGKchkQj5")
 VACCOUNT_SEED = b'vaccount'
-TESTNET_PRC_URI = 'https://api.mainnet.velas.com'
+VELAS_API_URI = 'https://api.testnet.velas.com'
+VELAS_RPC_URI = 'https://testnet.velas.com/rpc'
 BASE_OPERATIONAL_LEN = 134
 
 SIGN_TIMESTAMP_TOLERANCE = 120
