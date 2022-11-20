@@ -31,7 +31,7 @@ from redis import Redis
 
 import logging
 
-from synapse.handlers.vaccount_auth.constants import SIGN_TIMESTAMP_TOLERANCE, OPERATIONAL_STATE, TESTNET_PRC_URI
+from synapse.handlers.vaccount_auth.constants import SIGN_TIMESTAMP_TOLERANCE, OPERATIONAL_STATE, VELAS_API_URI, VELAS_RPC_URI
 from synapse.handlers.vaccount_auth.utils import VaccountInfo, get_vaccount_evm_address
 from synapse.api.errors import HttpResponseException
 from synapse.handlers.vaccount_auth.utils import is_valid_vaccount_address
@@ -49,8 +49,9 @@ class VaccountAuthProvider:
     def __init__(self, config, account_handler: ModuleApi):
         self.account_handler = account_handler
         self.store: DataStore = account_handler._hs.get_datastore()
+        self.network = config.get('VELAS_RPC_URI', VELAS_RPC_URI)
         self.velas_client = Client(
-            endpoint=config.get('NETWORK_PRC_URI', TESTNET_PRC_URI),
+            endpoint=config.get('VELAS_API_URI', VELAS_API_URI),
         ) 
         self.redis = Redis(
             host=config.get('REDIS_HOSTNAME'),
@@ -238,7 +239,6 @@ class VaccountAuthProvider:
     async def _get_parsed_account_info(self, account_address):
         """
         """
-        testnet = 'https://testnet.velas.com/rpc'
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -252,7 +252,7 @@ class VaccountAuthProvider:
         }
         try:
             account_data = await self.account_handler.http_client.post_json_get_json(
-                uri=testnet,
+                uri=self.network,
                 post_json=payload,
             )
         except HttpResponseException as e:
