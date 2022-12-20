@@ -23,27 +23,25 @@ jobs:
         run: |
           gcloud auth configure-docker ${{ secrets.GAR_PROD }} -q
           docker build -t $REPO/$APP_NAME:$IMAGE_TAG . -f docker/Dockerfile
-          docker tag $REPO/$APP_NAME:$IMAGE_TAG $REPO/$APP_NAME:${BRANCH_NAME//\//_}
+          docker tag $REPO/$APP_NAME:$IMAGE_TAG $REPO/$APP_NAME:${BRANCH_NAME}
           docker push $REPO/$APP_NAME:$IMAGE_TAG
-          docker push $REPO/$APP_NAME:${BRANCH_NAME//\//_}
+          docker push $REPO/$APP_NAME:${BRANCH_NAME}
   deploy:
     name: Deploy via Helmfile
     runs-on: prod-london
     needs: docker-build
     steps:
-      - name: Check out bitorbit-prod-infra
+      - name: Check out bitorbit-infra
         uses: actions/checkout@v3
         with:
-          repository: BitorbitLabs/bitorbit-prod-infra
+          repository: BitorbitLabs/bitorbit-infra
           ref: master
-          ssh-key: ${{ secrets.SSH_KEY_PROD_INFRA }}
+          ssh-key: ${{ secrets.SSH_KEY_INFRA }}
       - name: Deploy via helmfile
         id: deploy
-        env:
-          UPDATE_REPOS: "true"
         run: >
           cd helmfile &&
           helmfile -e ${ENVIRONMENT} -l name=${APP_NAME}
-          apply --skip-needs
+          apply --skip-deps --suppress-diff
           --set image.tag=${IMAGE_TAG}
           --set image.repository=${REPO}/${APP_NAME}

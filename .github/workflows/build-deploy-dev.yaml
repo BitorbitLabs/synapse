@@ -4,45 +4,44 @@ on:
     branches: [develop]
 
 env: 
-  APP_NAME: bitorbit-synapse-auth-provider
-  APP_REPO: bitorbit-synapse
- 
+  APP_NAME: bitorbit-synapse
+  REPO: ${{ secrets.GAR_DEV }}/${{ secrets.GCP_DEV_PROJECT }}/docker
+  IMAGE_TAG: ${{ github.sha }}
+  BRANCH_NAME: ${{ github.ref_name }}
+  ENVIRONMENT: dev
+
 jobs:
   docker-build:
     name: Build and push
-    runs-on: devnet-services
-    outputs:
-      repository: ${{ steps.build.outputs.repository }}
-      image_tag: ${{ steps.build.outputs.image_tag }}
+    runs-on: dev
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
+      - uses: google-github-actions/setup-gcloud@v0
       - name: Build, tag, and push image 
-        id: build
         env:
-          REGISTRY: ${{ secrets.REGISTRY_HOST }}/bitorbit
-          REPOSITORY: ${{ env.APP_REPO }}
-          IMAGE_TAG: ${{github.sha}}
+          DOCKER_BUILDKIT: 1
         run: |
-          docker build -t $REGISTRY/$REPOSITORY:$IMAGE_TAG --no-cache -f docker/Dockerfile .
-          docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
+          gcloud auth configure-docker ${{ secrets.GAR_DEV }} -q
+          docker build -t $REPO/$APP_NAME:$IMAGE_TAG . -f docker/Dockerfile
+          docker tag $REPO/$APP_NAME:$IMAGE_TAG $REPO/$APP_NAME:${BRANCH_NAME}
+          docker push $REPO/$APP_NAME:$IMAGE_TAG
+          docker push $REPO/$APP_NAME:${BRANCH_NAME}
   deploy:
     name: Deploy via Helmfile
-    runs-on: devnet-services
+    runs-on: dev
     needs: docker-build
     steps:
       - name: Check out bitorbit-infra
-        uses: actions/checkout@master
+        uses: actions/checkout@v3
         with:
           repository: BitorbitLabs/bitorbit-infra
           ref: master
           ssh-key: ${{ secrets.SSH_KEY_INFRA }}
       - name: Deploy via helmfile
         id: deploy
-        env:
-          REGISTRY: ${{ secrets.REGISTRY_HOST }}/bitorbit
-          REPOSITORY: ${{ env.APP_REPO }}
-          IMAGE_TAG: ${{github.sha}}
-          SOPS_AGE_KEY: ${{ secrets.INFRA_AGE }}
-        run: |
-          cd deploy
-          helmfile -e ${HELM_ENV} -l namespace=${NAMESPACE},name=${{ env.APP_NAME }} apply  --set image.tag=$IMAGE_TAG,image.repository=$REGISTRY/$REPOSITORY --skip-deps
+        run: >
+          cd helmfile &&
+          helmfile -e ${ENVIRONMENT} -l name=${APP_NAME}
+          apply --skip-deps --suppress-diff
+          --set image.tag=${IMAGE_TAG}
+          --set image.repository=${REPO}/${APP_NAME}
