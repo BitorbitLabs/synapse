@@ -31,12 +31,12 @@ jobs:
     runs-on: prod-london
     needs: docker-build
     steps:
-      - name: Check out bitorbit-prod-infra
+      - name: Check out bitorbit-infra
         uses: actions/checkout@v3
         with:
-          repository: BitorbitLabs/bitorbit-prod-infra
+          repository: BitorbitLabs/bitorbit-infra
           ref: master
-          ssh-key: ${{ secrets.SSH_KEY_PROD_INFRA }}
+          ssh-key: ${{ secrets.SSH_KEY_INFRA }}
       - name: Deploy via helmfile
         id: deploy
         run: >
