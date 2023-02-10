@@ -251,8 +251,6 @@ class VaccountAuthProvider:
 
                 if operational.pubkey == signer and operational.state == OPERATIONAL_STATE.enum.Initialized():
                     return True
-                else:
-                    logger.info("Vaccount: pubkey != signer OR state not initialized")
 
         return False
 
