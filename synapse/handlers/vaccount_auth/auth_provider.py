@@ -92,7 +92,7 @@ class VaccountAuthProvider:
         display_name = login_dict.get('displayname')
 
         if not signature or not signer_key or not signed_timestamp or not vaccount_address or not signer_type:
-            logger.error(f"Vaccount: error reading login json body")
+            logger.error("Vaccount: error reading login json body")
             return False
 
         if evm_vaccount_address.startswith("@") and ":" in evm_vaccount_address:
@@ -122,17 +122,15 @@ class VaccountAuthProvider:
 
         if not is_valid_signature or not is_active_vaccount or not is_valid_evm_address:
             logger.error(
-                f"""
-                    Vaccount: Failed auth check for {evm_vaccount_address}
-
-                    is_valid_signature: {is_valid_signature}
-                    is_active_vaccount: {is_active_vaccount}
-                    is_valid_evm_address: {is_valid_evm_address}
-                """)
+                "Vaccount: Failed auth check for %s ",
+                "is_valid_signature: %s ",
+                "is_active_vaccount: %s ",
+                "is_valid_evm_address: %s ",
+                evm_vaccount_address, is_valid_signature, is_active_vaccount, is_valid_evm_address)
             return False
 
         if not self._is_valid_sign_timestamp(evm_vaccount_address, signed_timestamp):
-            logger.error(f"Vaccount: Failed auth timestamp check for {evm_vaccount_address}")
+            logger.error("Vaccount: Failed auth timestamp check for %s", evm_vaccount_address)
             return False
 
         user_id = self.account_handler.get_qualified_user_id(username=evm_vaccount_address)
@@ -141,7 +139,7 @@ class VaccountAuthProvider:
             return user_id
 
         else:
-            logger.info(f"Vaccount: User {display_name} ({evm_vaccount_address}) does not exist. Registering.")
+            logger.info("Vaccount: User %s (%s) does not exist. Registering.", display_name, evm_vaccount_address)
             user_id = await self.register_user(
                 localpart=evm_vaccount_address,
                 displayname=display_name,
@@ -183,7 +181,7 @@ class VaccountAuthProvider:
             VerifyKey(signer_key).verify(signed_msg, signature)
 
         except BadSignatureError as e:
-            logger.error(f"Vaccount: Invalid signature provided for {signer_key}.")
+            logger.error("Vaccount: Invalid signature provided for %s.", signer_key)
             return False
 
         return True
@@ -203,7 +201,7 @@ class VaccountAuthProvider:
         if signed_timestamp >= int(last_signed_timestamp) and ts_window <= SIGN_TIMESTAMP_TOLERANCE:
             return True
         else:
-            logger.error(f"Vaccount: Invalid signin timestamp for {evm_vaccount_address}.")
+            logger.error("Vaccount: Invalid signin timestamp for %s", evm_vaccount_address)
         
         return False
 
@@ -220,7 +218,7 @@ class VaccountAuthProvider:
 
         if await self.account_handler.check_user_exists(user_id):
             # exists, authentication complete
-            logger.info(f"Vaccount: User {displayname} already registered, proceeding with login.")
+            logger.info("Vaccount: User %s already registered, proceeding with login.", displayname)
             return user_id
 
         user_id = await self.account_handler.register_user(
@@ -228,7 +226,7 @@ class VaccountAuthProvider:
             displayname=displayname,
         )
 
-        logger.info(f"Vaccount: Registration was successful: {user_id}")
+        logger.info("Vaccount: Registration was successful: %s", user_id)
         return user_id
 
     async def _is_active_vaccount(self, vaccount_address: PublicKey, signer: PublicKey, signer_type: str) -> bool:
@@ -270,7 +268,7 @@ class VaccountAuthProvider:
                 post_json=payload,
             )
         except HttpResponseException as e:
-            logger.info(f"HttpResponseException eeee*: {e}")
+            logger.info("Vaccount: HttpResponseException: %s", e)
             return None
 
         account_data = account_data.get('result').get('value').get('data').get('parsed').get('info')
