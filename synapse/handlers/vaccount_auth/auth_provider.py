@@ -92,6 +92,7 @@ class VaccountAuthProvider:
         display_name = login_dict.get('displayname')
 
         if not signature or not signer_key or not signed_timestamp or not vaccount_address or not signer_type:
+            logger.error(f"Vaccount: error reading login json body")
             return False
 
         if evm_vaccount_address.startswith("@") and ":" in evm_vaccount_address:
@@ -120,9 +121,18 @@ class VaccountAuthProvider:
         is_valid_evm_address = expected_evm_address == evm_vaccount_address
 
         if not is_valid_signature or not is_active_vaccount or not is_valid_evm_address:
+            logger.error(
+                f"""
+                    Failed auth check for {evm_vaccount_address}
+
+                    is_valid_signature: {is_valid_signature}
+                    is_active_vaccount: {is_active_vaccount}
+                    is_valid_evm_address: {is_valid_evm_address}
+                """)
             return False
 
         if not self._is_valid_sign_timestamp(evm_vaccount_address, signed_timestamp):
+            logger.error(f"Failed auth timestamp check for {evm_vaccount_address}")
             return False
 
         user_id = self.account_handler.get_qualified_user_id(username=evm_vaccount_address)
@@ -131,6 +141,7 @@ class VaccountAuthProvider:
             return user_id
 
         else:
+            logger.info(f"User {display_name} ({evm_vaccount_address}) does not exist. Registering.")
             user_id = await self.register_user(
                 localpart=evm_vaccount_address,
                 displayname=display_name,
@@ -172,7 +183,7 @@ class VaccountAuthProvider:
             VerifyKey(signer_key).verify(signed_msg, signature)
 
         except BadSignatureError as e:
-            logger.debug(f"Invalid signature provided for {signer_key}.")
+            logger.error(f"Invalid signature provided for {signer_key}.")
             return False
 
         return True
@@ -191,7 +202,9 @@ class VaccountAuthProvider:
 
         if signed_timestamp >= int(last_signed_timestamp) and ts_window <= SIGN_TIMESTAMP_TOLERANCE:
             return True
-
+        else:
+            logger.error(f"Invalid signin timestamp for {evm_vaccount_address}.")
+        
         return False
 
     async def register_user(self, localpart, displayname):
