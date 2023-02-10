@@ -1,6 +1,8 @@
 from typing import List, Tuple, Union
 import sha3
 
+import logging
+
 from solana.publickey import PublicKey
 from solana.rpc.api import Client
 from unpaddedbase64 import decode_base64
@@ -14,6 +16,7 @@ from synapse.handlers.vaccount_auth.constants import (
     OPERATIONAL_INFO,
 )
 
+logger = logging.getLogger(__name__)
 
 def is_valid_vaccount_address(genesis_key_seed: PublicKey, vaccount_id: PublicKey) -> bool:
     """Is valid `Vaccount` address.
