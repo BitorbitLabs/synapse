@@ -121,12 +121,13 @@ class VaccountAuthProvider:
         is_valid_evm_address = expected_evm_address == evm_vaccount_address
 
         if not is_valid_signature or not is_active_vaccount or not is_valid_evm_address:
-            logger.error(
-                "Vaccount: Failed auth check for %s ",
-                "is_valid_signature: %s ",
-                "is_active_vaccount: %s ",
-                "is_valid_evm_address: %s ",
-                evm_vaccount_address, is_valid_signature, is_active_vaccount, is_valid_evm_address)
+            logger.error("""
+                Vaccount: Failed auth check for %s
+                is_valid_signature: %s
+                is_active_vaccount: %s
+                is_valid_evm_address: %s
+                """,
+                evm_vaccount_address, str(is_valid_signature), str(is_active_vaccount), str(is_valid_evm_address))
             return False
 
         if not self._is_valid_sign_timestamp(evm_vaccount_address, signed_timestamp):
@@ -235,7 +236,12 @@ class VaccountAuthProvider:
         vaccount_info = VaccountInfo(vaccount_address, self.velas_client)
 
         if vaccount_info.is_ephemeral():
+            logger.info("Vaccount: account is ephemeral: %s", vaccount_address)
             return is_valid_vaccount_address(signer, vaccount_address)
+        else:
+            logger.info("Vaccount: account is not ephemeral: %s", vaccount_address)
+
+        logger.info("Vaccount: %s signer_type is %s", vaccount_address, signer_type)
 
         if signer_type == 'owner' and signer in vaccount_info.owners:
             return True
@@ -245,6 +251,8 @@ class VaccountAuthProvider:
 
                 if operational.pubkey == signer and operational.state == OPERATIONAL_STATE.enum.Initialized():
                     return True
+                else:
+                    logger.info("Vaccount: pubkey != signer OR state not initialized")
 
         return False
 
