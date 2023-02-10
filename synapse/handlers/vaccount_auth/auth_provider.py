@@ -52,6 +52,7 @@ class VaccountAuthProvider:
         self.network = config.get('VELAS_RPC_URI', VELAS_RPC_URI)
         self.velas_client = Client(
             endpoint=config.get('VELAS_API_URI', VELAS_API_URI),
+            timeout=30,
         ) 
         self.redis = Redis(
             host=config.get('REDIS_HOSTNAME'),
