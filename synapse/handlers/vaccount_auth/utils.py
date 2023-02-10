@@ -45,7 +45,8 @@ def is_valid_vaccount_address(genesis_key_seed: PublicKey, vaccount_id: PublicKe
                 return True
 
         except Exception as e:
-            logger.error("Vaccount: is_valid_vaccount_address error: %s", e)
+            logger.error("Vaccount: is_valid_vaccount_address error")
+            logger.exception(e)
             continue
 
     return False
@@ -72,7 +73,8 @@ def find_vaccount_address(genesis_key_seed: PublicKey) -> Union[Tuple[PublicKey,
             vaccount_address = PublicKey.create_program_address(seeds=expected_seeds, program_id=VACCOUNT_PROGRAM_ID)
 
         except Exception as e:
-            logger.error("Vaccount: find_vaccount_address error: %s", e)
+            logger.error("Vaccount: find_vaccount_address error")
+            logger.exception(e)
             continue
 
         else:
@@ -143,7 +145,8 @@ class VaccountInfo:
             self.token_storage_nonce = vaccount_info.token_storage_nonce
             self.programs_storage_nonce = vaccount_info.programs_storage_nonce
         except Exception as e:
-            logger.error("Vaccount: _set_vaccount_info error: %s", e)
+            logger.error("Vaccount: _set_vaccount_info error")
+            logger.exception(e)
             return
 
     def _set_operational_storage(self):
@@ -164,7 +167,8 @@ class VaccountInfo:
             self.operational_storage = operational_storage
 
         except Exception as e:
-            logger.error("Vaccount: _set_operational_storage error: %s", e)
+            logger.error("Vaccount: _set_operational_storage error")
+            logger.exception(e)
             return
 
     
