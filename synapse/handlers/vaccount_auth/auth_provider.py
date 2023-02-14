@@ -52,6 +52,7 @@ class VaccountAuthProvider:
         self.network = config.get('VELAS_RPC_URI', VELAS_RPC_URI)
         self.velas_client = Client(
             endpoint=config.get('VELAS_API_URI', VELAS_API_URI),
+            timeout=30,
         ) 
         self.redis = Redis(
             host=config.get('REDIS_HOSTNAME'),
@@ -92,6 +93,7 @@ class VaccountAuthProvider:
         display_name = login_dict.get('displayname')
 
         if not signature or not signer_key or not signed_timestamp or not vaccount_address or not signer_type:
+            logger.error("Vaccount: error reading login json body")
             return False
 
         if evm_vaccount_address.startswith("@") and ":" in evm_vaccount_address:
@@ -120,9 +122,17 @@ class VaccountAuthProvider:
         is_valid_evm_address = expected_evm_address == evm_vaccount_address
 
         if not is_valid_signature or not is_active_vaccount or not is_valid_evm_address:
+            logger.error("""
+                Vaccount: Failed auth check for %s
+                is_valid_signature: %s
+                is_active_vaccount: %s
+                is_valid_evm_address: %s
+                """,
+                evm_vaccount_address, str(is_valid_signature), str(is_active_vaccount), str(is_valid_evm_address))
             return False
 
         if not self._is_valid_sign_timestamp(evm_vaccount_address, signed_timestamp):
+            logger.error("Vaccount: Failed auth timestamp check for %s", evm_vaccount_address)
             return False
 
         user_id = self.account_handler.get_qualified_user_id(username=evm_vaccount_address)
@@ -131,6 +141,7 @@ class VaccountAuthProvider:
             return user_id
 
         else:
+            logger.info("Vaccount: User %s (%s) does not exist. Registering.", display_name, evm_vaccount_address)
             user_id = await self.register_user(
                 localpart=evm_vaccount_address,
                 displayname=display_name,
@@ -172,7 +183,7 @@ class VaccountAuthProvider:
             VerifyKey(signer_key).verify(signed_msg, signature)
 
         except BadSignatureError as e:
-            logger.debug(f"Invalid signature provided for {signer_key}.")
+            logger.error("Vaccount: Invalid signature provided for %s.", signer_key)
             return False
 
         return True
@@ -191,7 +202,9 @@ class VaccountAuthProvider:
 
         if signed_timestamp >= int(last_signed_timestamp) and ts_window <= SIGN_TIMESTAMP_TOLERANCE:
             return True
-
+        else:
+            logger.error("Vaccount: Invalid signin timestamp for %s", evm_vaccount_address)
+        
         return False
 
     async def register_user(self, localpart, displayname):
@@ -207,6 +220,7 @@ class VaccountAuthProvider:
 
         if await self.account_handler.check_user_exists(user_id):
             # exists, authentication complete
+            logger.info("Vaccount: User %s already registered, proceeding with login.", displayname)
             return user_id
 
         user_id = await self.account_handler.register_user(
@@ -214,7 +228,7 @@ class VaccountAuthProvider:
             displayname=displayname,
         )
 
-        logger.info(f"Registration was successful: {user_id}")
+        logger.info("Vaccount: Registration was successful: %s", user_id)
         return user_id
 
     async def _is_active_vaccount(self, vaccount_address: PublicKey, signer: PublicKey, signer_type: str) -> bool:
@@ -223,7 +237,12 @@ class VaccountAuthProvider:
         vaccount_info = VaccountInfo(vaccount_address, self.velas_client)
 
         if vaccount_info.is_ephemeral():
+            logger.info("Vaccount: account is ephemeral: %s", vaccount_address)
             return is_valid_vaccount_address(signer, vaccount_address)
+        else:
+            logger.info("Vaccount: account is not ephemeral: %s", vaccount_address)
+
+        logger.info("Vaccount: %s signer_type is %s", vaccount_address, signer_type)
 
         if signer_type == 'owner' and signer in vaccount_info.owners:
             return True
@@ -256,7 +275,7 @@ class VaccountAuthProvider:
                 post_json=payload,
             )
         except HttpResponseException as e:
-            logger.info(f"HttpResponseException eeee*: {e}")
+            logger.info("Vaccount: HttpResponseException: %s", e)
             return None
 
         account_data = account_data.get('result').get('value').get('data').get('parsed').get('info')

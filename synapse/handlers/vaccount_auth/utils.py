@@ -1,6 +1,8 @@
 from typing import List, Tuple, Union
 import sha3
 
+import logging
+
 from solana.publickey import PublicKey
 from solana.rpc.api import Client
 from unpaddedbase64 import decode_base64
@@ -14,6 +16,7 @@ from synapse.handlers.vaccount_auth.constants import (
     OPERATIONAL_INFO,
 )
 
+logger = logging.getLogger(__name__)
 
 def is_valid_vaccount_address(genesis_key_seed: PublicKey, vaccount_id: PublicKey) -> bool:
     """Is valid `Vaccount` address.
@@ -41,7 +44,9 @@ def is_valid_vaccount_address(genesis_key_seed: PublicKey, vaccount_id: PublicKe
             if generated_vaccount_address == vaccount_id:
                 return True
 
-        except Exception:
+        except Exception as e:
+            logger.error("Vaccount: is_valid_vaccount_address error")
+            logger.exception(e)
             continue
 
     return False
@@ -67,7 +72,9 @@ def find_vaccount_address(genesis_key_seed: PublicKey) -> Union[Tuple[PublicKey,
             expected_seeds = seeds + [bytes([i])]
             vaccount_address = PublicKey.create_program_address(seeds=expected_seeds, program_id=VACCOUNT_PROGRAM_ID)
 
-        except Exception:
+        except Exception as e:
+            logger.error("Vaccount: find_vaccount_address error")
+            logger.exception(e)
             continue
 
         else:
@@ -137,7 +144,9 @@ class VaccountInfo:
             self.operational_storage_nonce = vaccount_info.operational_storage_nonce
             self.token_storage_nonce = vaccount_info.token_storage_nonce
             self.programs_storage_nonce = vaccount_info.programs_storage_nonce
-        except Exception:
+        except Exception as e:
+            logger.error("Vaccount: _set_vaccount_info error")
+            logger.exception(e)
             return
 
     def _set_operational_storage(self):
@@ -157,7 +166,9 @@ class VaccountInfo:
 
             self.operational_storage = operational_storage
 
-        except Exception:
+        except Exception as e:
+            logger.error("Vaccount: _set_operational_storage error")
+            logger.exception(e)
             return
 
     
